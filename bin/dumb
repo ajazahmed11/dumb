@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -65,10 +65,10 @@ run_init() {
     echo -e "${BLUE}=====================================================${NC}\n"
     echo -e "Let's configure DUMB for your machine in 4 quick steps.\n"
 
-    # Step 1: Projects Directory
-    echo -e "${BOLD}1. Where do you store your source code / projects?${NC}"
-    read -rp "   Path [default: $HOME/Projects]: " input_projects
-    PROJECTS_PATH="${input_projects:-$HOME/Projects}"
+    # Step 1: Personal Folders
+    echo -e "${BOLD}1. Custom Personal Folders to sync (comma-separated):${NC}"
+    echo -e "   Default: $HOME/Documents, $HOME/Pictures, $HOME/Projects"
+    read -rp "   Add extra paths (or press Enter to keep default): " extra_paths
 
     # Step 2: Browser Preset
     echo -e "\n${BOLD}2. Which browser do you want to keep persistently logged in?${NC}"
@@ -107,16 +107,74 @@ run_init() {
     read -rp "   Target Remote [default: gdrive:Ajaz-Backup-Hub]: " input_remote
     REMOTE_CHOICE="${input_remote:-gdrive:Ajaz-Backup-Hub}"
 
+    # Build personal dirs list
+    local pdirs_str="(\n    \"\$HOME/Documents\"\n    \"\$HOME/Pictures\"\n    \"\$HOME/Projects\""
+    if [ -n "$extra_paths" ]; then
+        IFS=',' read -ra ADDR <<< "$extra_paths"
+        for p in "${ADDR[@]}"; do
+            trimmed="$(echo "$p" | xargs)"
+            if [ -n "$trimmed" ]; then
+                pdirs_str+="\n    \"$trimmed\""
+            fi
+        done
+    fi
+    pdirs_str+="\n)"
+
     # Generate config/layers.conf
     cat << CFG > "$CONFIG_FILE"
 # ==============================================================================
-# DUMB — Generated Workstation Configuration
+# DUMB — Workstation Configuration
 # ==============================================================================
 
 DUMB_REMOTE="${REMOTE_CHOICE}"
-DUMB_PROJECTS_DIR="${PROJECTS_PATH}"
 DUMB_BROWSER_PRESET="${BROWSER_CHOICE}"
 DUMB_HARDWARE_PRESET="${HARDWARE_CHOICE}"
+
+PERSONAL_DIRS=${pdirs_str}
+
+EXCLUDE_PERSONAL=(
+    ".git/**"
+    "node_modules/**"
+    ".venv/**"
+    "venv/**"
+    "__pycache__/**"
+    "target/**"
+    "build/**"
+    "*.iso"
+)
+
+EXCLUDE_CONFIG=(
+    "*Cache*/**"
+    "*cache*/**"
+    "*GPUCache*/**"
+    "*Code Cache*/**"
+    "*CacheStorage*/**"
+    "*blob_storage*/**"
+    "mozilla/**"
+    "BraveSoftware/**"
+    "google-chrome/**"
+    "*.lock"
+    "*.sock"
+    "dconf/user"
+)
+
+AI_AGENT_DIRS=(
+    "gemini:\$HOME/.gemini/antigravity-cli"
+    "claude:\$HOME/.claude"
+    "codex:\$HOME/.codex"
+    "cursor:\$HOME/.cursor"
+    "openclaw:\$HOME/.openclaw"
+)
+
+EXCLUDE_AI_AGENTS=(
+    "*.log"
+    "antigravity-oauth-token"
+    ".credentials.json"
+    "cache/**"
+    "daemon/**"
+    "downloads/**"
+    "telemetry/**"
+)
 CFG
 
     echo -e "\n${GREEN}✅ Configuration saved successfully to:${NC} ${CONFIG_FILE}"
@@ -137,35 +195,35 @@ run_backup() {
         exit 1
     fi
 
-    # 1. Personal Files
-    echo -e "${GREEN}[Layer 1/6] Personal Files (Documents, Pictures, Projects)...${NC}"
-    [ -d "$HOME/Documents" ] && "$RCLONE_CMD" sync "$HOME/Documents" "${REMOTE}/01-Personal-Files/Documents" \
-        --backup-dir "${TRASH}/01-Personal-Files/Documents" \
-        --exclude ".git/**" --exclude "__pycache__/**" --fast-list --links $dry_flag
+    # 1. Personal Files (Declarative)
+    echo -e "${GREEN}[Layer 1/6] Personal Files...${NC}"
+    local p_excludes=()
+    for exc in "${EXCLUDE_PERSONAL[@]}"; do
+        p_excludes+=(--exclude "$exc")
+    done
 
-    [ -d "$HOME/Pictures" ] && "$RCLONE_CMD" sync "$HOME/Pictures" "${REMOTE}/01-Personal-Files/Pictures" \
-        --backup-dir "${TRASH}/01-Personal-Files/Pictures" --fast-list --links $dry_flag
-
-    local projects_dir="${DUMB_PROJECTS_DIR:-$HOME/Projects}"
-    if [ -d "$projects_dir" ]; then
-        "$RCLONE_CMD" sync "$projects_dir" "${REMOTE}/01-Personal-Files/Projects" \
-            --backup-dir "${TRASH}/01-Personal-Files/Projects" \
-            --exclude ".venv/**" --exclude "venv/**" --exclude "node_modules/**" \
-            --exclude "__pycache__/**" --exclude "target/**" --exclude "build/**" \
-            --fast-list --links $dry_flag
-    fi
+    for pdir in "${PERSONAL_DIRS[@]}"; do
+        eval pdir="$pdir"
+        if [ -d "$pdir" ]; then
+            local bname
+            bname="$(basename "$pdir")"
+            echo "   • Syncing: $pdir -> ${REMOTE}/01-Personal-Files/${bname}"
+            "$RCLONE_CMD" sync "$pdir" "${REMOTE}/01-Personal-Files/${bname}" \
+                --backup-dir "${TRASH}/01-Personal-Files/${bname}" \
+                "${p_excludes[@]}" --fast-list --links $dry_flag
+        fi
+    done
 
     # 2. Clean dot-config
     echo -e "\n${GREEN}[Layer 2/6] Clean App Configurations (~/.config)...${NC}"
     if [ -d "$HOME/.config" ]; then
+        local cfg_excludes=()
+        for exc in "${EXCLUDE_CONFIG[@]}"; do
+            cfg_excludes+=(--exclude "$exc")
+        done
         "$RCLONE_CMD" sync "$HOME/.config" "${REMOTE}/02-dot-config" \
             --backup-dir "${TRASH}/02-dot-config" \
-            --exclude "*Cache*/**" --exclude "*cache*/**" --exclude "*GPUCache*/**" \
-            --exclude "*Code Cache*/**" --exclude "*CacheStorage*/**" \
-            --exclude "*blob_storage*/**" --exclude "mozilla/**" \
-            --exclude "BraveSoftware/**" --exclude "google-chrome/**" \
-            --exclude "*.lock" --exclude "*.sock" --exclude "dconf/user" \
-            --fast-list --links $dry_flag
+            "${cfg_excludes[@]}" --fast-list --links $dry_flag
     fi
 
     # 3. Browser Session Vault (Dynamic Preset)
@@ -182,13 +240,14 @@ run_backup() {
             fi
         done
         if [ -n "$found_browser" ]; then
-            local exclude_args=()
+            local b_excludes=()
             for exc in "${BROWSER_EXCLUDES[@]}"; do
-                exclude_args+=(--exclude "$exc")
+                b_excludes+=(--exclude "$exc")
             done
+            echo "   • Syncing Browser [${BROWSER_NAME}]: $found_browser"
             "$RCLONE_CMD" sync "$found_browser" "${REMOTE}/03-Browser-Vault" \
                 --backup-dir "${TRASH}/03-Browser-Vault" \
-                "${exclude_args[@]}" --fast-list --links $dry_flag
+                "${b_excludes[@]}" --fast-list --links $dry_flag
         else
             echo "   No active profile directory found for ${BROWSER_NAME}. Skipping."
         fi
@@ -209,20 +268,24 @@ run_backup() {
             --exclude "agy" --exclude "rclone" --fast-list --links $dry_flag
     fi
 
-    # 5. AI Agent Vault
-    echo -e "\n${GREEN}[Layer 5/6] AI Agent Vault (Antigravity & Claude)...${NC}"
-    if [ -d "$HOME/.gemini/antigravity-cli" ]; then
-        "$RCLONE_CMD" sync "$HOME/.gemini/antigravity-cli" "${REMOTE}/05-AI-Agent-Vault/gemini/antigravity-cli" \
-            --backup-dir "${TRASH}/05-AI-Agent-Vault/gemini/antigravity-cli" \
-            --exclude "*.log" --exclude "antigravity-oauth-token" --fast-list --links $dry_flag
-    fi
+    # 5. AI Agent Vault (Declarative Loop)
+    echo -e "\n${GREEN}[Layer 5/6] AI Agent Vault...${NC}"
+    local ai_excludes=()
+    for exc in "${EXCLUDE_AI_AGENTS[@]}"; do
+        ai_excludes+=(--exclude "$exc")
+    done
 
-    if [ -d "$HOME/.claude" ]; then
-        "$RCLONE_CMD" sync "$HOME/.claude" "${REMOTE}/05-AI-Agent-Vault/claude" \
-            --backup-dir "${TRASH}/05-AI-Agent-Vault/claude" \
-            --exclude "cache/**" --exclude "daemon/**" --exclude "downloads/**" \
-            --fast-list --links $dry_flag
-    fi
+    for agent_entry in "${AI_AGENT_DIRS[@]}"; do
+        local agent_name="${agent_entry%%:*}"
+        local agent_path="${agent_entry#*:}"
+        eval agent_path="$agent_path"
+        if [ -d "$agent_path" ]; then
+            echo "   • Syncing AI Agent [${agent_name}]: $agent_path"
+            "$RCLONE_CMD" sync "$agent_path" "${REMOTE}/05-AI-Agent-Vault/${agent_name}" \
+                --backup-dir "${TRASH}/05-AI-Agent-Vault/${agent_name}" \
+                "${ai_excludes[@]}" --fast-list --links $dry_flag
+        fi
+    done
 
     # 6. Hardware Blueprint & Fonts (Dynamic Preset)
     echo -e "\n${GREEN}[Layer 6/6] Hardware Blueprint (Preset: ${HARDWARE_PRESET})...${NC}"
