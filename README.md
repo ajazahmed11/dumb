@@ -122,8 +122,16 @@ dumb unbundle /run/media/$USER/PENDRIVE/my-workstation.tar.zst
 
 # 7. Restore onto a fresh OS (interactive checklist or flag-driven)
 dumb restore
+dumb restore -n --layers 1,3,4   # Safe preview mode (-n / --dry-run)
 dumb restore --layers 1,3,4      # Restore Personal, Browser Logins, and Dotfiles
 ```
+
+---
+
+## 🔒 Security Advisory: Layer 3 & Browser Sessions
+
+* **The Design**: Layer 3 (`03-Browser-Vault`) preserves session cookies (`cookies.sqlite`) and local storage by design so that you don't have to re-authenticate 2FA for 20+ accounts after a fresh install.
+* **Best Practice for Cloud Storage**: Because session tokens are sensitive, if you are backing up to a shared or public cloud remote, we strongly recommend pointing DUMB to an **`rclone crypt`** remote (client-side encrypted bucket) or keeping Layer 3 on an **offline USB flash drive / pendrive**.
 
 ---
 
