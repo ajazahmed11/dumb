@@ -96,14 +96,21 @@ ln -s ~/.local/share/dumb/bin/dumb ~/.local/bin/dumb
 ### 2. Basic Usage
 
 ```bash
-# Run the master backup
-dumb backup
+# 1. Configure DUMB for your machine (interactive 4-step wizard)
+dumb init
 
-# Inspect what would be pruned vs backed up (dry-run)
+# 2. Calculate how much disposable cache bloat DUMB will strip
+dumb inspect
+
+# 3. Dry-run inspection (see what transfers without touching anything)
 dumb check
 
-# View active backup targets and layer status
-dumb status
+# 4. Run the clean 6-layer backup
+dumb backup
+
+# 5. Restore onto a fresh OS (interactive checklist or flag-driven)
+dumb restore
+dumb restore --layers 1,3,4      # Restore Personal, Browser Logins, and Dotfiles
 ```
 
 ---
