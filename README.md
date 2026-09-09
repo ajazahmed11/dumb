@@ -96,33 +96,39 @@ ln -s ~/.local/share/dumb/bin/dumb ~/.local/bin/dumb
 ### 2. Basic Usage
 
 ```bash
-# 1. Configure DUMB for your machine (interactive 4-step wizard)
+# 1. Open the Interactive Menu (Default when running bare 'dumb')
+dumb
+
+# 2. Configure DUMB for your machine (guided 4-step wizard)
 dumb init
 
-# 2. Calculate how much disposable cache bloat DUMB will strip
+# 3. Add custom paths or dotfiles to any layer easily
+dumb add 1 ~/Music               # Add custom folder to Layer 1 (Personal Files)
+dumb add 4 ~/.tmux.conf          # Add dotfile to Layer 4
+dumb add 5 ollama:~/.ollama      # Add custom AI agent to Layer 5
+
+# 4. Calculate how much disposable cache bloat DUMB will strip
 dumb inspect
 
-# 3. Dry-run inspection (see what transfers without touching anything)
+# 5. Dry-run inspection (preview what transfers without touching anything)
 dumb check
 
-# 4. Run the clean 6-layer backup (Cloud via rclone, or USB/Nextcloud via rsync)
-dumb backup
-
-# Target & Selective Examples:
-dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault  # USB Pendrive (offline, native rsync)
+# 6. Run workstation backup (Select & Go, or with CLI flags)
+dumb backup                                          # Interactive Select & Go
+dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault  # USB Pendrive / SSD (rsync)
 dumb backup -r $HOME/Nextcloud/DUMB-Vault            # Nextcloud / Dropbox sync folder
 dumb backup -r gdrive:DUMB-Vault                     # Google Drive (cloud rclone)
 dumb backup -l 1,4                                   # Fast selective backup (Personal + Dotfiles)
-dumb backup -n                                       # Safe backup dry-run preview
+dumb backup -y                                       # Non-interactive / cron (skip [y/N] prompt)
 
-# 5. Show exact WHAT, WHERE, and HOW breakdown
+# 7. Show exact WHAT, WHERE, and HOW breakdown
 dumb explain
 
-# 6. Create a single-file portable archive on a USB Pendrive
+# 8. Create a single-file portable archive on a USB Pendrive
 dumb bundle /run/media/$USER/PENDRIVE/my-workstation.tar.zst
 dumb unbundle /run/media/$USER/PENDRIVE/my-workstation.tar.zst
 
-# 7. Restore onto a fresh OS (interactive checklist or flag-driven)
+# 9. Restore onto a fresh OS (interactive checklist or flag-driven)
 dumb restore
 dumb restore -n --layers 1,3,4   # Safe preview mode (-n / --dry-run)
 dumb restore --layers 1,3,4      # Restore Personal, Browser Logins, and Dotfiles

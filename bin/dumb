@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-VERSION="0.8.1"
+VERSION="0.8.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -24,9 +24,10 @@ if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 fi
 
-REMOTE="${DUMB_REMOTE:-gdrive:DUMB-Vault}"
+REMOTE="${DUMB_REMOTE:-}"
 DATE=$(date +%Y-%m-%d)
-TRASH="${REMOTE}/Old-Versions/${DATE}"
+TRASH=""
+[ -n "$REMOTE" ] && TRASH="${REMOTE}/Old-Versions/${DATE}"
 BROWSER_PRESET="${DUMB_BROWSER_PRESET:-firefox}"
 HARDWARE_PRESET="${DUMB_HARDWARE_PRESET:-asus-rog}"
 IS_DRY_RUN="false"
@@ -79,6 +80,15 @@ if [ -z "${DOTFILES+x}" ] || [ ${#DOTFILES[@]} -eq 0 ]; then
     )
 fi
 
+# Fallback arrays for user-extended layer paths if undefined
+[ -z "${EXTRA_PERSONAL_DIRS+x}" ] && EXTRA_PERSONAL_DIRS=()
+[ -z "${EXTRA_CONFIG_DIRS+x}" ] && EXTRA_CONFIG_DIRS=()
+[ -z "${EXTRA_BROWSER_PATHS+x}" ] && EXTRA_BROWSER_PATHS=()
+[ -z "${EXTRA_SCRIPT_DIRS+x}" ] && EXTRA_SCRIPT_DIRS=()
+[ -z "${EXTRA_AI_AGENT_DIRS+x}" ] && EXTRA_AI_AGENT_DIRS=()
+[ -z "${EXTRA_HARDWARE_PATHS+x}" ] && EXTRA_HARDWARE_PATHS=()
+[ -z "${EXTRA_FONT_DIRS+x}" ] && EXTRA_FONT_DIRS=()
+
 # Detect available engines
 RCLONE_CMD="$(command -v rclone 2>/dev/null || echo "$HOME/.local/bin/rclone")"
 RSYNC_CMD="$(command -v rsync 2>/dev/null || echo "")"
@@ -93,7 +103,11 @@ notify_user() {
 
 detect_engine() {
     local target="$1"
-    if [[ "$target" =~ ^[a-zA-Z0-9_-]+: ]]; then
+    if [ -z "$target" ]; then
+        echo "none"
+    elif [[ "$target" =~ ^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+: ]]; then
+        echo "rsync (SSH)"
+    elif [[ "$target" =~ ^[a-zA-Z0-9_-]+: ]]; then
         echo "rclone"
     else
         echo "rsync"
@@ -101,15 +115,19 @@ detect_engine() {
 }
 
 print_banner() {
-    TRASH="${REMOTE}/Old-Versions/${DATE}"
+    [ -n "$REMOTE" ] && TRASH="${REMOTE}/Old-Versions/${DATE}"
     local active_engine
     active_engine="$(detect_engine "$REMOTE")"
     echo -e "${BLUE}=====================================================${NC}"
     echo -e "${BLUE}  🥱 DUMB — DUMB's Universal Migration & Backup     ${NC}"
     echo -e "${BLUE}  Version:   v${VERSION}                                  ${NC}"
-    echo -e "${BLUE}  Target:    ${REMOTE}                             ${NC}"
-    echo -e "${BLUE}  Engine:    ${active_engine} (Auto-detected)             ${NC}"
-    echo -e "${BLUE}  Safety:    ${TRASH}                             ${NC}"
+    if [ -n "$REMOTE" ]; then
+        echo -e "${BLUE}  Target:    ${REMOTE}                             ${NC}"
+        echo -e "${BLUE}  Engine:    ${active_engine}                             ${NC}"
+        echo -e "${BLUE}  Safety:    ${TRASH}                             ${NC}"
+    else
+        echo -e "${BLUE}  Target:    [Not Configured - Select & Go]       ${NC}"
+    fi
     echo -e "${BLUE}  Browser:   ${BROWSER_PRESET}                    ${NC}"
     echo -e "${BLUE}  Hardware:  ${HARDWARE_PRESET}                   ${NC}"
     echo -e "${BLUE}=====================================================${NC}"
@@ -118,12 +136,14 @@ print_banner() {
 usage() {
     echo -e "Usage: dumb [COMMAND] [OPTIONS]\n"
     echo -e "Commands:"
-    echo -e "  backup [OPTIONS]     Run workstation backup (all layers or selective -l)"
+    echo -e "  menu                 Open interactive main menu (Default when run without args)"
+    echo -e "  backup [OPTIONS]     Run workstation backup (Select & Go or selective -l)"
     echo -e "  restore [OPTIONS]    Restore selected layers onto this workstation"
     echo -e "  bundle [FILE.tar.zst] Pack entire clean workstation into a single pendrive archive"
     echo -e "  unbundle <ARCHIVE>   Restore from a single pendrive archive"
     echo -e "  explain              Show exact WHAT, WHERE, and HOW breakdown of this system"
     echo -e "  inspect              Scan and calculate disposable cache bloat eliminated"
+    echo -e "  add [LAYER] [PATH]   Add custom path or dotfile to any layer in layers.conf"
     echo -e "  init                 Guided setup wizard with auto-detection for USB/Cloud/Folders"
     echo -e "  check [OPTIONS]      Dry-run inspection of what would be backed up"
     echo -e "  status               Show current backup configuration and target state"
@@ -133,8 +153,10 @@ usage() {
     echo -e "  -r, --remote <dest>  Override target remote, local folder, or USB path"
     echo -e "  -l, --layers <list>  Comma-separated layers to backup/restore (1-6 or A)"
     echo -e "  -n, --dry-run        Simulate restore/backup without writing any files"
+    echo -e "  -y, --yes            Skip pre-flight confirmation (for automated scripts)"
     echo -e "  -h, --help           Show help\n"
     echo -e "Target Examples:"
+    echo -e "  dumb                                                 # Interactive Select & Go Menu"
     echo -e "  dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault   # USB Pendrive / Flash Drive"
     echo -e "  dumb backup -r $HOME/Nextcloud/DUMB-Vault             # Nextcloud / Dropbox"
     echo -e "  dumb backup -r gdrive:DUMB-Vault                     # Google Drive (rclone)"
@@ -254,13 +276,17 @@ restore_file() {
 
 # Layer 1: Personal Files
 explain_layer_1() {
-    for p in "${PERSONAL_DIRS[@]}"; do
+    local all_p=("${PERSONAL_DIRS[@]}" "${EXTRA_PERSONAL_DIRS[@]}")
+    for p in "${all_p[@]}"; do
+        [ -z "$p" ] && continue
         local p_exp="${p/#\~/$HOME}"
         [ -d "$p_exp" ] && echo "     - $p_exp (Excludes: node_modules, .venv, build, __pycache__)"
     done
 }
 backup_layer_1() {
-    for pdir in "${PERSONAL_DIRS[@]}"; do
+    local all_p=("${PERSONAL_DIRS[@]}" "${EXTRA_PERSONAL_DIRS[@]}")
+    for pdir in "${all_p[@]}"; do
+        [ -z "$pdir" ] && continue
         local pdir_exp="${pdir/#\~/$HOME}"
         if [ -d "$pdir_exp" ]; then
             local bname
@@ -272,7 +298,9 @@ backup_layer_1() {
     done
 }
 restore_layer_1() {
-    for pdir in "${PERSONAL_DIRS[@]}"; do
+    local all_p=("${PERSONAL_DIRS[@]}" "${EXTRA_PERSONAL_DIRS[@]}")
+    for pdir in "${all_p[@]}"; do
+        [ -z "$pdir" ] && continue
         local pdir_exp="${pdir/#\~/$HOME}"
         local bname
         bname="$(basename "$pdir_exp")"
@@ -283,20 +311,49 @@ restore_layer_1() {
 # Layer 2: Clean App Configurations (~/.config)
 explain_layer_2() {
     echo "     - $HOME/.config (Excludes: GPUCache, blob_storage, sockets, locks)"
+    for extra_c in "${EXTRA_CONFIG_DIRS[@]}"; do
+        [ -z "$extra_c" ] && continue
+        local extra_c_exp="${extra_c/#\~/$HOME}"
+        [ -d "$extra_c_exp" ] && echo "     - Extra config: $extra_c_exp"
+    done
 }
 backup_layer_2() {
     if [ -d "$HOME/.config" ]; then
+        echo "   • Syncing: $HOME/.config -> ${REMOTE}/02-dot-config"
         dumb_sync "$HOME/.config" "${REMOTE}/02-dot-config" \
             "${TRASH}/02-dot-config" "${EXCLUDE_CONFIG[@]}"
     fi
+    for extra_c in "${EXTRA_CONFIG_DIRS[@]}"; do
+        [ -z "$extra_c" ] && continue
+        local extra_c_exp="${extra_c/#\~/$HOME}"
+        if [ -d "$extra_c_exp" ]; then
+            local bname
+            bname="$(basename "$extra_c_exp")"
+            echo "   • Syncing extra config: $extra_c_exp"
+            dumb_sync "$extra_c_exp" "${REMOTE}/02-dot-config/extra/${bname}" \
+                "${TRASH}/02-dot-config/extra/${bname}" "${EXCLUDE_CONFIG[@]}"
+        fi
+    done
 }
 restore_layer_2() {
     restore_copy "${REMOTE}/02-dot-config" "$HOME/.config"
+    for extra_c in "${EXTRA_CONFIG_DIRS[@]}"; do
+        [ -z "$extra_c" ] && continue
+        local extra_c_exp="${extra_c/#\~/$HOME}"
+        local bname
+        bname="$(basename "$extra_c_exp")"
+        restore_copy "${REMOTE}/02-dot-config/extra/${bname}" "$extra_c_exp"
+    done
 }
 
 # Layer 3: Browser Session Vault
 explain_layer_3() {
     echo "     - Preset '${BROWSER_PRESET}' (Preserves cookies & logins, strips disposable cache2/)"
+    for extra_b in "${EXTRA_BROWSER_PATHS[@]}"; do
+        [ -z "$extra_b" ] && continue
+        local extra_b_exp="${extra_b/#\~/$HOME}"
+        [ -d "$extra_b_exp" ] && echo "     - Extra browser profile: $extra_b_exp"
+    done
 }
 backup_layer_3() {
     local browser_preset_file="${PROJECT_ROOT}/presets/browsers/${BROWSER_PRESET}.conf"
@@ -316,11 +373,22 @@ backup_layer_3() {
             dumb_sync "$found_browser" "${REMOTE}/03-Browser-Vault" \
                 "${TRASH}/03-Browser-Vault" "${BROWSER_EXCLUDES[@]}"
         else
-            echo "   No active profile directory found for ${BROWSER_NAME}. Skipping."
+            echo "   No active profile directory found for ${BROWSER_NAME}. Skipping preset."
         fi
     else
         echo "   Browser preset set to 'none' or preset file missing. Skipping."
     fi
+    for extra_b in "${EXTRA_BROWSER_PATHS[@]}"; do
+        [ -z "$extra_b" ] && continue
+        local extra_b_exp="${extra_b/#\~/$HOME}"
+        if [ -d "$extra_b_exp" ]; then
+            local bname
+            bname="$(basename "$extra_b_exp")"
+            echo "   • Syncing extra browser profile: $extra_b_exp"
+            dumb_sync "$extra_b_exp" "${REMOTE}/03-Browser-Vault/extra/${bname}" \
+                "${TRASH}/03-Browser-Vault/extra/${bname}" "*Cache*/**" "*cache*/**" "*CacheStorage*/**"
+        fi
+    done
 }
 restore_layer_3() {
     local browser_preset_file="${PROJECT_ROOT}/presets/browsers/${BROWSER_PRESET}.conf"
@@ -333,19 +401,34 @@ restore_layer_3() {
         restore_copy "${REMOTE}/03-Browser-Vault" "$dest_path"
         echo "   Logins and cookies target: $dest_path"
     fi
+    for extra_b in "${EXTRA_BROWSER_PATHS[@]}"; do
+        [ -z "$extra_b" ] && continue
+        local extra_b_exp="${extra_b/#\~/$HOME}"
+        local bname
+        bname="$(basename "$extra_b_exp")"
+        mkdir -p "$extra_b_exp"
+        restore_copy "${REMOTE}/03-Browser-Vault/extra/${bname}" "$extra_b_exp"
+    done
 }
 
 # Layer 4: Home Dotfiles & Custom Scripts
 explain_layer_4() {
     echo "     - Tracked dotfiles:"
     for df in "${DOTFILES[@]}"; do
+        [ -z "$df" ] && continue
         local df_exp="${df/#\~/$HOME}"
         [ -f "$df_exp" ] && echo "       • $df_exp"
     done
     [ -d "$HOME/.local/bin" ] && echo "     - Custom user scripts: $HOME/.local/bin"
+    for extra_s in "${EXTRA_SCRIPT_DIRS[@]}"; do
+        [ -z "$extra_s" ] && continue
+        local extra_s_exp="${extra_s/#\~/$HOME}"
+        [ -d "$extra_s_exp" ] && echo "     - Extra script directory: $extra_s_exp"
+    done
 }
 backup_layer_4() {
     for df in "${DOTFILES[@]}"; do
+        [ -z "$df" ] && continue
         local df_exp="${df/#\~/$HOME}"
         if [ -f "$df_exp" ]; then
             echo "   • Syncing dotfile: $df_exp"
@@ -356,21 +439,45 @@ backup_layer_4() {
         dumb_sync "$HOME/.local/bin" "${REMOTE}/04-Home-Dotfiles/local-bin" \
             "${TRASH}/04-Home-Dotfiles/local-bin" "agy" "rclone"
     fi
+    for extra_s in "${EXTRA_SCRIPT_DIRS[@]}"; do
+        [ -z "$extra_s" ] && continue
+        local extra_s_exp="${extra_s/#\~/$HOME}"
+        if [ -d "$extra_s_exp" ]; then
+            local bname
+            bname="$(basename "$extra_s_exp")"
+            echo "   • Syncing extra script directory: $extra_s_exp"
+            dumb_sync "$extra_s_exp" "${REMOTE}/04-Home-Dotfiles/${bname}" \
+                "${TRASH}/04-Home-Dotfiles/${bname}"
+        fi
+    done
 }
 restore_layer_4() {
     for df in "${DOTFILES[@]}"; do
+        [ -z "$df" ] && continue
         local df_exp="${df/#\~/$HOME}"
         local bname
         bname="$(basename "$df_exp")"
         restore_file "${REMOTE}/04-Home-Dotfiles/${bname}" "$df_exp"
     done
-    mkdir -p "$HOME/.local/bin"
-    restore_copy "${REMOTE}/04-Home-Dotfiles/local-bin" "$HOME/.local/bin"
+    if [ -d "$HOME/.local/bin" ] || [ -d "${REMOTE}/04-Home-Dotfiles/local-bin" ]; then
+        mkdir -p "$HOME/.local/bin"
+        restore_copy "${REMOTE}/04-Home-Dotfiles/local-bin" "$HOME/.local/bin"
+    fi
+    for extra_s in "${EXTRA_SCRIPT_DIRS[@]}"; do
+        [ -z "$extra_s" ] && continue
+        local extra_s_exp="${extra_s/#\~/$HOME}"
+        local bname
+        bname="$(basename "$extra_s_exp")"
+        mkdir -p "$extra_s_exp"
+        restore_copy "${REMOTE}/04-Home-Dotfiles/${bname}" "$extra_s_exp"
+    done
 }
 
 # Layer 5: AI Agent Vault
 explain_layer_5() {
-    for a in "${AI_AGENT_DIRS[@]}"; do
+    local all_agents=("${AI_AGENT_DIRS[@]}" "${EXTRA_AI_AGENT_DIRS[@]}")
+    for a in "${all_agents[@]}"; do
+        [ -z "$a" ] && continue
         local aname="${a%%:*}"
         local apath="${a#*:}"
         apath="${apath/#\~/$HOME}"
@@ -378,7 +485,9 @@ explain_layer_5() {
     done
 }
 backup_layer_5() {
-    for agent_entry in "${AI_AGENT_DIRS[@]}"; do
+    local all_agents=("${AI_AGENT_DIRS[@]}" "${EXTRA_AI_AGENT_DIRS[@]}")
+    for agent_entry in "${all_agents[@]}"; do
+        [ -z "$agent_entry" ] && continue
         local agent_name="${agent_entry%%:*}"
         local agent_path="${agent_entry#*:}"
         agent_path="${agent_path/#\~/$HOME}"
@@ -390,7 +499,9 @@ backup_layer_5() {
     done
 }
 restore_layer_5() {
-    for agent_entry in "${AI_AGENT_DIRS[@]}"; do
+    local all_agents=("${AI_AGENT_DIRS[@]}" "${EXTRA_AI_AGENT_DIRS[@]}")
+    for agent_entry in "${all_agents[@]}"; do
+        [ -z "$agent_entry" ] && continue
         local agent_name="${agent_entry%%:*}"
         local agent_path="${agent_entry#*:}"
         agent_path="${agent_path/#\~/$HOME}"
@@ -402,6 +513,16 @@ restore_layer_5() {
 # Layer 6: Hardware Blueprint & Fonts
 explain_layer_6() {
     echo "     - Preset '${HARDWARE_PRESET}' (fan curves, CPU boost disable service, fonts)"
+    for extra_hw in "${EXTRA_HARDWARE_PATHS[@]}"; do
+        [ -z "$extra_hw" ] && continue
+        local extra_hw_exp="${extra_hw/#\~/$HOME}"
+        [ -e "$extra_hw_exp" ] && echo "     - Extra hardware path: $extra_hw_exp"
+    done
+    for extra_f in "${EXTRA_FONT_DIRS[@]}"; do
+        [ -z "$extra_f" ] && continue
+        local extra_f_exp="${extra_f/#\~/$HOME}"
+        [ -d "$extra_f_exp" ] && echo "     - Extra font directory: $extra_f_exp"
+    done
 }
 backup_layer_6() {
     local hw_preset_file="${PROJECT_ROOT}/presets/hardware/${HARDWARE_PRESET}.conf"
@@ -422,16 +543,58 @@ backup_layer_6() {
             fi
         done
     fi
+    for extra_hw in "${EXTRA_HARDWARE_PATHS[@]}"; do
+        [ -z "$extra_hw" ] && continue
+        local extra_hw_exp="${extra_hw/#\~/$HOME}"
+        if [ -e "$extra_hw_exp" ]; then
+            local bname
+            bname="$(basename "$extra_hw_exp")"
+            if [ -d "$extra_hw_exp" ]; then
+                dumb_sync "$extra_hw_exp" "${REMOTE}/06-Hardware-Blueprint/extra/${bname}" \
+                    "${TRASH}/06-Hardware-Blueprint/extra/${bname}"
+            else
+                dumb_copy "$extra_hw_exp" "${REMOTE}/06-Hardware-Blueprint/extra/"
+            fi
+        fi
+    done
     if [ -d "$HOME/.local/share/fonts/JetBrainsMono" ]; then
         dumb_sync "$HOME/.local/share/fonts/JetBrainsMono" "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" \
             "${TRASH}/06-Hardware-Blueprint/fonts/JetBrainsMono"
     fi
+    for extra_f in "${EXTRA_FONT_DIRS[@]}"; do
+        [ -z "$extra_f" ] && continue
+        local extra_f_exp="${extra_f/#\~/$HOME}"
+        if [ -d "$extra_f_exp" ]; then
+            local bname
+            bname="$(basename "$extra_f_exp")"
+            dumb_sync "$extra_f_exp" "${REMOTE}/06-Hardware-Blueprint/fonts/${bname}" \
+                "${TRASH}/06-Hardware-Blueprint/fonts/${bname}"
+        fi
+    done
 }
 restore_layer_6() {
     local blueprint_dir="${HARDWARE_BLUEPRINT_DIR:-$HOME/Hardware-Blueprint}"
     mkdir -p "$blueprint_dir" "$HOME/.local/share/fonts/JetBrainsMono"
     restore_copy "${REMOTE}/06-Hardware-Blueprint" "$blueprint_dir"
     restore_copy "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" "$HOME/.local/share/fonts/JetBrainsMono"
+    for extra_hw in "${EXTRA_HARDWARE_PATHS[@]}"; do
+        [ -z "$extra_hw" ] && continue
+        local extra_hw_exp="${extra_hw/#\~/$HOME}"
+        local bname
+        bname="$(basename "$extra_hw_exp")"
+        if [ -d "$extra_hw_exp" ]; then
+            restore_copy "${REMOTE}/06-Hardware-Blueprint/extra/${bname}" "$extra_hw_exp"
+        else
+            restore_file "${REMOTE}/06-Hardware-Blueprint/extra/${bname}" "$extra_hw_exp"
+        fi
+    done
+    for extra_f in "${EXTRA_FONT_DIRS[@]}"; do
+        [ -z "$extra_f" ] && continue
+        local extra_f_exp="${extra_f/#\~/$HOME}"
+        local bname
+        bname="$(basename "$extra_f_exp")"
+        restore_copy "${REMOTE}/06-Hardware-Blueprint/fonts/${bname}" "$extra_f_exp"
+    done
     if command -v fc-cache &>/dev/null && [ "$IS_DRY_RUN" != "true" ]; then
         fc-cache -fv "$HOME/.local/share/fonts" &>/dev/null || true
     fi
@@ -510,20 +673,331 @@ run_explain() {
     echo ""
 }
 
+save_remote_to_config() {
+    local target="$1"
+    if [ -f "$CONFIG_FILE" ]; then
+        if grep -q '^[[:space:]]*DUMB_REMOTE=' "$CONFIG_FILE"; then
+            sed -i "s|^[[:space:]]*DUMB_REMOTE=.*|DUMB_REMOTE=\"${target}\"|" "$CONFIG_FILE"
+        else
+            echo "DUMB_REMOTE=\"${target}\"" >> "$CONFIG_FILE"
+        fi
+        echo -e "${GREEN}Default destination saved to config/layers.conf${NC}"
+    fi
+}
+
+select_storage_target() {
+    echo -e "\n${BLUE}=====================================================${NC}"
+    echo -e "${BOLD}  💾 Select Storage Destination                       ${NC}"
+    echo -e "${BLUE}=====================================================${NC}"
+    echo "Where would you like to store your backup?"
+    echo "  [1] External SSD / USB Flash Drive (rsync)"
+    echo "  [2] Local Sync Folder (Nextcloud, Dropbox, Syncthing, ~/Backups)"
+    echo "  [3] Cloud Storage Account (Google Drive, OneDrive via rclone)"
+    echo "  [4] Remote Server via SSH (rsync)"
+    echo "  [5] Custom Path / Local Directory"
+    read -rp "Select storage type [1-5, default: 1]: " dest_choice
+    dest_choice="${dest_choice:-1}"
+
+    case "$dest_choice" in
+        1)
+            local found_usbs=()
+            for media_dir in "/run/media/$USER" "/media/$USER" "/media" "/mnt"; do
+                if [ -d "$media_dir" ]; then
+                    for d in "$media_dir"/*; do
+                        [ -d "$d" ] && found_usbs+=("$d")
+                    done
+                fi
+            done
+
+            if [ ${#found_usbs[@]} -gt 0 ]; then
+                echo -e "\n${GREEN}Detected mounted drives on your system:${NC}"
+                local idx=1
+                for usb in "${found_usbs[@]}"; do
+                    echo "  [$idx] $usb"
+                    idx=$((idx + 1))
+                done
+                read -rp "Select drive [1-${#found_usbs[@]}] or enter custom path: " usb_sel
+                if [[ "$usb_sel" =~ ^[0-9]+$ ]] && [ "$usb_sel" -le "${#found_usbs[@]}" ] && [ "$usb_sel" -ge 1 ]; then
+                    local selected_usb="${found_usbs[$((usb_sel - 1))]}"
+                    read -rp "Enter vault subfolder name on drive [default: DUMB-Vault]: " vf
+                    REMOTE="${selected_usb}/${vf:-DUMB-Vault}"
+                else
+                    REMOTE="${usb_sel:-/run/media/$USER/PENDRIVE/DUMB-Vault}"
+                fi
+            else
+                echo -e "\n${YELLOW}No mounted external drives detected in /run/media/$USER or /media.${NC}"
+                read -rp "Enter mount path of your USB/SSD [e.g. /run/media/$USER/PENDRIVE/DUMB-Vault]: " input_usb
+                REMOTE="${input_usb:-/run/media/$USER/PENDRIVE/DUMB-Vault}"
+            fi
+            ;;
+        2)
+            local found_syncs=()
+            for sf in "$HOME/Nextcloud" "$HOME/Dropbox" "$HOME/MEGAsync" "$HOME/pCloudDrive" "$HOME/SynologyDrive" "$HOME/Sync" "$HOME/Backups"; do
+                [ -d "$sf" ] && found_syncs+=("$sf")
+            done
+
+            if [ ${#found_syncs[@]} -gt 0 ]; then
+                echo -e "\n${GREEN}Detected local sync folders on your system:${NC}"
+                local idx=1
+                for s in "${found_syncs[@]}"; do
+                    echo "  [$idx] $s"
+                    idx=$((idx + 1))
+                done
+                read -rp "Select folder [1-${#found_syncs[@]}] or enter custom path: " sf_sel
+                if [[ "$sf_sel" =~ ^[0-9]+$ ]] && [ "$sf_sel" -le "${#found_syncs[@]}" ] && [ "$sf_sel" -ge 1 ]; then
+                    local selected_sf="${found_syncs[$((sf_sel - 1))]}"
+                    read -rp "Enter vault subfolder name [default: DUMB-Vault]: " vf
+                    REMOTE="${selected_sf}/${vf:-DUMB-Vault}"
+                else
+                    REMOTE="${sf_sel:-$HOME/Nextcloud/DUMB-Vault}"
+                fi
+            else
+                read -rp "Enter sync folder path [default: $HOME/DUMB-Vault]: " input_sync
+                REMOTE="${input_sync:-$HOME/DUMB-Vault}"
+            fi
+            ;;
+        3)
+            if ! command -v "$RCLONE_CMD" &>/dev/null; then
+                echo -e "\n${YELLOW}⚠️ rclone is not installed on this system.${NC}"
+                echo -e "To install rclone:"
+                echo -e "  • Fedora/Nobara:  sudo dnf install rclone"
+                echo -e "  • Arch Linux:     sudo pacman -S rclone"
+                echo -e "  • Ubuntu/Debian:  sudo apt install rclone\n"
+                read -rp "Enter fallback local folder or pendrive path [default: $HOME/DUMB-Vault]: " fb_path
+                REMOTE="${fb_path:-$HOME/DUMB-Vault}"
+            else
+                local raw_remotes
+                raw_remotes="$("$RCLONE_CMD" listremotes 2>/dev/null || true)"
+                local remote_list=()
+                while IFS= read -r line; do
+                    [ -n "$line" ] && remote_list+=("$line")
+                done <<< "$raw_remotes"
+
+                if [ ${#remote_list[@]} -gt 0 ]; then
+                    echo -e "\n${GREEN}Detected cloud accounts configured in rclone:${NC}"
+                    local idx=1
+                    for r in "${remote_list[@]}"; do
+                        echo "  [$idx] $r"
+                        idx=$((idx + 1))
+                    done
+                    echo "  [C] Configure a new cloud account (runs 'rclone config')"
+                    read -rp "Select account [1-${#remote_list[@]} or C, default: 1]: " r_sel
+                    if [[ "$r_sel" =~ ^[Cc] ]]; then
+                        "$RCLONE_CMD" config
+                        raw_remotes="$("$RCLONE_CMD" listremotes 2>/dev/null || true)"
+                        remote_list=()
+                        while IFS= read -r line; do
+                            [ -n "$line" ] && remote_list+=("$line")
+                        done <<< "$raw_remotes"
+                    fi
+                    if [[ "$r_sel" =~ ^[0-9]+$ ]] && [ "$r_sel" -le "${#remote_list[@]}" ] && [ "$r_sel" -ge 1 ]; then
+                        local chosen_remote="${remote_list[$((r_sel - 1))]}"
+                        read -rp "Enter vault folder name on $chosen_remote [default: DUMB-Vault]: " cloud_f
+                        REMOTE="${chosen_remote}${cloud_f:-DUMB-Vault}"
+                    else
+                        REMOTE="${remote_list[0]}DUMB-Vault"
+                    fi
+                else
+                    echo -e "\n${YELLOW}⚠️ No cloud accounts configured in rclone yet.${NC}"
+                    read -rp "Would you like to run 'rclone config' now? [y/N]: " do_cfg
+                    if [[ "$do_cfg" =~ ^[Yy] ]]; then
+                        "$RCLONE_CMD" config
+                        read -rp "Enter configured remote name (e.g. gdrive:DUMB-Vault): " entered_remote
+                        REMOTE="${entered_remote:-gdrive:DUMB-Vault}"
+                    else
+                        REMOTE="$HOME/DUMB-Vault"
+                    fi
+                fi
+            fi
+            ;;
+        4)
+            read -rp "Enter remote SSH destination [e.g. user@server:/path/to/DUMB-Vault]: " ssh_dest
+            REMOTE="${ssh_dest}"
+            ;;
+        5)
+            read -rp "Enter custom target path [default: $HOME/DUMB-Vault]: " custom_target
+            REMOTE="${custom_target:-$HOME/DUMB-Vault}"
+            ;;
+    esac
+
+    read -rp "Save '${REMOTE}' as default destination in config/layers.conf? [y/N]: " save_pref || save_pref="n"
+    if [[ "$save_pref" =~ ^[Yy] ]]; then
+        save_remote_to_config "$REMOTE"
+    fi
+}
+
+select_layers() {
+    echo -e "\n${BLUE}=====================================================${NC}"
+    echo -e "${BOLD}  📑 Select Workstation Layers                        ${NC}"
+    echo -e "${BLUE}=====================================================${NC}"
+    for entry in "${AVAILABLE_LAYERS[@]}"; do
+        local lid="${entry%%|*}"
+        local rest="${entry#*|}"
+        local lname="${rest%%|*}"
+        local ldesc="${rest##*|}"
+        echo "  [${lid}] ${lname} (${ldesc})"
+    done
+    echo "  [A] All Layers (1-6) [Default]"
+    read -rp "Select layers to backup [e.g. 1,4 or A, default: A]: " SELECTED_LAYERS
+    SELECTED_LAYERS="${SELECTED_LAYERS:-A}"
+}
+
+run_add() {
+    local target_layer="$1"
+    local target_path="$2"
+
+    echo -e "${BLUE}=====================================================${NC}"
+    echo -e "${BOLD}  ➕ Add Custom Paths to DUMB Layers                  ${NC}"
+    echo -e "${BLUE}=====================================================${NC}\n"
+
+    if [ -z "$target_layer" ]; then
+        echo "Which layer would you like to add items to?"
+        for entry in "${AVAILABLE_LAYERS[@]}"; do
+            local lid="${entry%%|*}"
+            local rest="${entry#*|}"
+            local lname="${rest%%|*}"
+            echo "  [${lid}] Layer ${lid}: ${lname}"
+        done
+        read -rp "Select layer [1-6]: " target_layer
+    fi
+
+    if [ -z "$target_path" ]; then
+        case "$target_layer" in
+            1) read -rp "Enter personal directory to sync [e.g. $HOME/Music]: " target_path ;;
+            2) read -rp "Enter extra config directory [e.g. $HOME/.var/app]: " target_path ;;
+            3) read -rp "Enter extra browser profile path [e.g. $HOME/.zen]: " target_path ;;
+            4) read -rp "Enter dotfile path or extra script directory [e.g. $HOME/.tmux.conf]: " target_path ;;
+            5) read -rp "Enter AI agent entry [format: name:path, e.g. ollama:$HOME/.ollama]: " target_path ;;
+            6) read -rp "Enter extra hardware path or font dir [e.g. $HOME/.fonts]: " target_path ;;
+            *) echo -e "${RED}Invalid layer selection: ${target_layer}${NC}"; return 1 ;;
+        esac
+    fi
+
+    if [ -z "$target_path" ]; then
+        echo -e "${YELLOW}No path provided. Aborting.${NC}"
+        return 1
+    fi
+
+    local config_var=""
+    case "$target_layer" in
+        1) config_var="EXTRA_PERSONAL_DIRS" ;;
+        2) config_var="EXTRA_CONFIG_DIRS" ;;
+        3) config_var="EXTRA_BROWSER_PATHS" ;;
+        4)
+            local expanded_check="${target_path/#\~/$HOME}"
+            if [ -d "$expanded_check" ]; then
+                config_var="EXTRA_SCRIPT_DIRS"
+            else
+                config_var="DOTFILES"
+            fi
+            ;;
+        5) config_var="EXTRA_AI_AGENT_DIRS" ;;
+        6)
+            if [[ "$target_path" =~ font ]]; then
+                config_var="EXTRA_FONT_DIRS"
+            else
+                config_var="EXTRA_HARDWARE_PATHS"
+            fi
+            ;;
+        *) echo -e "${RED}Invalid layer: ${target_layer}${NC}"; return 1 ;;
+    esac
+
+    local normalized_path="$target_path"
+    normalized_path="${normalized_path/#$HOME/\$HOME}"
+
+    if [ -f "$CONFIG_FILE" ]; then
+        echo -e "\n# Added via 'dumb add':" >> "$CONFIG_FILE"
+        echo "${config_var}+=(\"${normalized_path}\")" >> "$CONFIG_FILE"
+        echo -e "\n${GREEN}✅ Successfully added to Layer ${target_layer} (${config_var}):${NC} ${target_path}"
+        echo -e "Saved to ${CONFIG_FILE}"
+    else
+        echo -e "${RED}Error: ${CONFIG_FILE} not found.${NC}"
+        return 1
+    fi
+}
+
+run_menu() {
+    print_banner
+    echo -e "Welcome to DUMB! Choose an action:\n"
+    echo "  [1] Backup Workstation (Select & Go)"
+    echo "  [2] Restore Workstation (Selective Restore)"
+    echo "  [3] Inspect Bloat & Disposable Cache"
+    echo "  [4] Pack Single-File Bundle (.tar.zst)"
+    echo "  [5] Restore From Single-File Bundle (.tar.zst)"
+    echo "  [6] Guided Setup Wizard (init)"
+    echo "  [7] Explain System Breakdown (What, Where, How)"
+    echo "  [8] Add Custom Item to a Layer"
+    echo "  [9] Check Target Status & Connectivity"
+    echo "  [Q] Quit"
+    echo ""
+    read -rp "Select option [1-9, Q to quit, default: 1]: " menu_choice
+    menu_choice="${menu_choice:-1}"
+
+    case "$menu_choice" in
+        1)
+            run_backup "" "false" "false"
+            ;;
+        2)
+            run_restore "" "false"
+            ;;
+        3)
+            run_inspect
+            ;;
+        4)
+            run_bundle ""
+            ;;
+        5)
+            read -rp "Enter path to archive (.tar.zst): " arch_file
+            run_unbundle "$arch_file"
+            ;;
+        6)
+            run_init
+            ;;
+        7)
+            run_explain
+            ;;
+        8)
+            run_add "" ""
+            ;;
+        9)
+            run_status
+            ;;
+        [Qq])
+            echo -e "${BLUE}Exiting DUMB. Have a great day!${NC}"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid selection: ${menu_choice}${NC}"
+            exit 1
+            ;;
+    esac
+}
+
 run_status() {
     print_banner
+    if [ -z "$REMOTE" ]; then
+        echo -e "\n${YELLOW}No target destination configured yet.${NC}"
+        echo -e "Run 'dumb' or 'dumb backup' to select a storage location via Select & Go."
+        return 0
+    fi
     local active_engine
     active_engine="$(detect_engine "$REMOTE")"
     echo -e "\nConfigured Target: ${REMOTE}"
     echo -e "Storage Engine:    ${active_engine}"
     echo -e "Testing destination access..."
     if [ "$active_engine" = "rclone" ]; then
-        if "$RCLONE_CMD" lsd "${REMOTE}" &>/dev/null; then
-            echo -e "${GREEN}Status: ONLINE (Cloud)${NC}"
-            echo -e "\nActive Layers on Remote:"
-            "$RCLONE_CMD" lsf "${REMOTE}"
+        local cloud_remote="${REMOTE%%:*}:"
+        if "$RCLONE_CMD" lsd "${cloud_remote}" &>/dev/null; then
+            echo -e "${GREEN}Status: ONLINE (Cloud remote '${cloud_remote}' reachable)${NC}"
+            if "$RCLONE_CMD" lsd "${REMOTE}" &>/dev/null; then
+                echo -e "Vault Directory:   Found"
+                echo -e "\nActive Layers on Remote:"
+                "$RCLONE_CMD" lsf "${REMOTE}"
+            else
+                echo -e "Vault Directory:   Not created yet (will be created automatically on first backup)."
+            fi
         else
-            echo -e "${RED}Status: OFFLINE or cloud remote unreachable.${NC}"
+            echo -e "${RED}Status: OFFLINE (Could not reach cloud remote '${cloud_remote}').${NC}"
         fi
     else
         if [ -d "$REMOTE" ]; then
@@ -531,7 +1005,7 @@ run_status() {
             echo -e "\nActive Layers on Target:"
             ls -la "$REMOTE"
         else
-            echo -e "${YELLOW}Status: Target directory does not exist yet (will be created on first backup).${NC}"
+            echo -e "${YELLOW}Status: Target directory does not exist yet (will be created automatically on first backup).${NC}"
         fi
     fi
 }
@@ -575,129 +1049,15 @@ run_init() {
         *) HARDWARE_CHOICE="asus-rog" ;;
     esac
 
-    # Step 4: Storage Target (Smart Auto-Detection)
-    echo -e "\n${BOLD}4. Where do you want to save your workstation state?${NC}"
-    echo "   [1] USB Flash Drive / Pendrive"
-    echo "   [2] Local Sync Folder (Nextcloud, Dropbox, or custom folder)"
-    echo "   [3] Cloud Storage Account (Google Drive, OneDrive via rclone)"
-    read -rp "   Choice [1-3, default: 3]: " input_dest_type
-
-    case "$input_dest_type" in
-        1)
-            local found_usbs=()
-            for media_dir in "/run/media/$USER" "/media/$USER" "/mnt"; do
-                if [ -d "$media_dir" ]; then
-                    for d in "$media_dir"/*; do
-                        [ -d "$d" ] && found_usbs+=("$d")
-                    done
-                fi
-            done
-
-            if [ ${#found_usbs[@]} -gt 0 ]; then
-                echo -e "\n   ${GREEN}Detected mounted drives on your system:${NC}"
-                local idx=1
-                for usb in "${found_usbs[@]}"; do
-                    echo "     [$idx] $usb"
-                    idx=$((idx + 1))
-                done
-                read -rp "   Select drive [1-${#found_usbs[@]}] or type custom path: " usb_sel
-                if [[ "$usb_sel" =~ ^[0-9]+$ ]] && [ "$usb_sel" -le "${#found_usbs[@]}" ] && [ "$usb_sel" -ge 1 ]; then
-                    selected_usb="${found_usbs[$((usb_sel - 1))]}"
-                    REMOTE_CHOICE="${selected_usb}/DUMB-Vault"
-                else
-                    REMOTE_CHOICE="${usb_sel:-/run/media/$USER/PENDRIVE/DUMB-Vault}"
-                fi
-            else
-                read -rp "   Enter USB / Pendrive mount path [e.g. /run/media/$USER/PENDRIVE/DUMB-Vault]: " input_usb
-                REMOTE_CHOICE="${input_usb:-/run/media/$USER/PENDRIVE/DUMB-Vault}"
-            fi
-            ;;
-        2)
-            local found_syncs=()
-            for sf in "$HOME/Nextcloud" "$HOME/Dropbox" "$HOME/MEGAsync" "$HOME/pCloudDrive" "$HOME/SynologyDrive"; do
-                [ -d "$sf" ] && found_syncs+=("$sf")
-            done
-
-            if [ ${#found_syncs[@]} -gt 0 ]; then
-                echo -e "\n   ${GREEN}Detected local cloud sync folders on your system:${NC}"
-                local idx=1
-                for s in "${found_syncs[@]}"; do
-                    echo "     [$idx] $s"
-                    idx=$((idx + 1))
-                done
-                read -rp "   Select folder [1-${#found_syncs[@]}] or type custom path: " sf_sel
-                if [[ "$sf_sel" =~ ^[0-9]+$ ]] && [ "$sf_sel" -le "${#found_syncs[@]}" ] && [ "$sf_sel" -ge 1 ]; then
-                    selected_sf="${found_syncs[$((sf_sel - 1))]}"
-                    REMOTE_CHOICE="${selected_sf}/DUMB-Vault"
-                else
-                    REMOTE_CHOICE="${sf_sel:-$HOME/Nextcloud/DUMB-Vault}"
-                fi
-            else
-                read -rp "   Enter Sync Folder path [default: $HOME/Nextcloud/DUMB-Vault]: " input_sync
-                REMOTE_CHOICE="${input_sync:-$HOME/Nextcloud/DUMB-Vault}"
-            fi
-            ;;
-        *)
-            if ! command -v "$RCLONE_CMD" &>/dev/null; then
-                echo -e "\n   ${YELLOW}⚠️ rclone is not installed on this system.${NC}"
-                echo -e "   To install rclone:"
-                echo -e "     • Fedora/Nobara:  sudo dnf install rclone"
-                echo -e "     • Arch Linux:     sudo pacman -S rclone"
-                echo -e "     • Ubuntu/Debian:  sudo apt install rclone\n"
-                read -rp "   Would you rather switch to a local folder/pendrive? [Y/n]: " switch_local
-                if [[ ! "$switch_local" =~ ^[Nn] ]]; then
-                    REMOTE_CHOICE="$HOME/DUMB-Vault"
-                else
-                    REMOTE_CHOICE="gdrive:DUMB-Vault"
-                fi
-            else
-                local raw_remotes
-                raw_remotes="$("$RCLONE_CMD" listremotes 2>/dev/null || true)"
-                local remote_list=()
-                while IFS= read -r line; do
-                    [ -n "$line" ] && remote_list+=("$line")
-                done <<< "$raw_remotes"
-
-                if [ ${#remote_list[@]} -gt 0 ]; then
-                    echo -e "\n   ${GREEN}Found cloud accounts configured in your rclone:${NC}"
-                    local idx=1
-                    for r in "${remote_list[@]}"; do
-                        echo "     [$idx] $r"
-                        idx=$((idx + 1))
-                    done
-                    echo "     [C] Configure a new cloud account (runs 'rclone config')"
-                    read -rp "   Select account [1-${#remote_list[@]} or C, default: 1]: " r_sel
-                    if [[ "$r_sel" =~ ^[Cc] ]]; then
-                        "$RCLONE_CMD" config
-                        raw_remotes="$("$RCLONE_CMD" listremotes 2>/dev/null || true)"
-                    fi
-                    if [[ "$r_sel" =~ ^[0-9]+$ ]] && [ "$r_sel" -le "${#remote_list[@]}" ] && [ "$r_sel" -ge 1 ]; then
-                        local chosen_remote="${remote_list[$((r_sel - 1))]}"
-                        read -rp "   Enter folder name on $chosen_remote [default: DUMB-Vault]: " cloud_f
-                        REMOTE_CHOICE="${chosen_remote}${cloud_f:-DUMB-Vault}"
-                    else
-                        REMOTE_CHOICE="${remote_list[0]}DUMB-Vault"
-                    fi
-                else
-                    echo -e "\n   ${YELLOW}⚠️ No cloud accounts configured in rclone yet.${NC}"
-                    read -rp "   Would you like to run 'rclone config' now to connect Google Drive/OneDrive? [y/N]: " do_cfg
-                    if [[ "$do_cfg" =~ ^[Yy] ]]; then
-                        "$RCLONE_CMD" config
-                        raw_remotes="$("$RCLONE_CMD" listremotes 2>/dev/null || true)"
-                        REMOTE_CHOICE="gdrive:DUMB-Vault"
-                    else
-                        echo "   No problem! Setting up local offline backup at ~/DUMB-Vault."
-                        REMOTE_CHOICE="$HOME/DUMB-Vault"
-                    fi
-                fi
-            fi
-            ;;
-    esac
+    # Step 4: Storage Destination
+    select_storage_target
+    local REMOTE_CHOICE="$REMOTE"
 
     local pdirs_str="(\n    \"\$HOME/Documents\"\n    \"\$HOME/Pictures\"\n    \"\$HOME/Projects\""
     if [ -n "$extra_paths" ]; then
         IFS=',' read -ra ADDR <<< "$extra_paths"
         for p in "${ADDR[@]}"; do
+            local trimmed
             trimmed="$(echo "$p" | xargs)"
             if [ -n "$trimmed" ]; then
                 pdirs_str+="\n    \"$trimmed\""
@@ -708,14 +1068,29 @@ run_init() {
 
     cat << CFG > "$CONFIG_FILE"
 # ==============================================================================
-# DUMB — Workstation Configuration
+# DUMB — Workstation Configuration & Declarative Layer Definitions
 # ==============================================================================
 
+# Target storage destination (External SSD/USB, Local Sync Folder, Cloud, or SSH)
 DUMB_REMOTE="${REMOTE_CHOICE}"
+
+# Active Presets
 DUMB_BROWSER_PRESET="${BROWSER_CHOICE}"
 DUMB_HARDWARE_PRESET="${HARDWARE_CHOICE}"
 
+# Master Layer Registry
+AVAILABLE_LAYERS=(
+    "1|Personal Files|Documents, Projects, Pictures, etc."
+    "2|Application Configurations|Clean ~/.config (excluding cache bloat)"
+    "3|Browser Session Vault|Persistent logins and session cookies"
+    "4|Home Dotfiles & Scripts|Tracked dotfiles and ~/.local/bin scripts"
+    "5|AI Agent Vault|All configured AI agent memories and brain contexts"
+    "6|Hardware Blueprint & Fonts|Fan curves, system services, and fonts"
+)
+
+# Layer 1: Personal Files
 PERSONAL_DIRS=${pdirs_str}
+EXTRA_PERSONAL_DIRS=()
 
 EXCLUDE_PERSONAL=(
     ".git/**"
@@ -728,6 +1103,7 @@ EXCLUDE_PERSONAL=(
     "*.iso"
 )
 
+# Layer 2: Application Configurations (~/.config)
 EXCLUDE_CONFIG=(
     "*Cache*/**"
     "*cache*/**"
@@ -742,7 +1118,21 @@ EXCLUDE_CONFIG=(
     "*.sock"
     "dconf/user"
 )
+EXTRA_CONFIG_DIRS=()
 
+# Layer 3: Browser Session Vault
+EXTRA_BROWSER_PATHS=()
+
+# Layer 4: Home Dotfiles & Custom Scripts
+DOTFILES=(
+    "\$HOME/.bashrc"
+    "\$HOME/.gitconfig"
+    "\$HOME/.profile"
+    "\$HOME/.zshrc"
+)
+EXTRA_SCRIPT_DIRS=()
+
+# Layer 5: AI Agent Vault
 AI_AGENT_DIRS=(
     "gemini:\$HOME/.gemini/antigravity-cli"
     "claude:\$HOME/.claude"
@@ -750,6 +1140,7 @@ AI_AGENT_DIRS=(
     "cursor:\$HOME/.cursor"
     "openclaw:\$HOME/.openclaw"
 )
+EXTRA_AI_AGENT_DIRS=()
 
 EXCLUDE_AI_AGENTS=(
     "*.log"
@@ -760,6 +1151,10 @@ EXCLUDE_AI_AGENTS=(
     "downloads/**"
     "telemetry/**"
 )
+
+# Layer 6: Hardware Blueprint & Fonts
+EXTRA_HARDWARE_PATHS=()
+EXTRA_FONT_DIRS=()
 CFG
 
     echo -e "\n${GREEN}✅ Configuration saved successfully to:${NC} ${CONFIG_FILE}"
@@ -778,7 +1173,7 @@ run_bundle() {
     local temp_stage
     temp_stage="$(mktemp -d /tmp/dumb-stage-XXXXXX)"
     echo "1. Staging clean 6-layer workstation to temp directory..."
-    REMOTE="$temp_stage" TRASH="${temp_stage}/Old-Versions/${DATE}" run_backup "" "false" &>/dev/null
+    REMOTE="$temp_stage" TRASH="${temp_stage}/Old-Versions/${DATE}" run_backup "" "false" "true" &>/dev/null
 
     echo "2. Compressing into clean single-file archive: ${archive_target}..."
     if command -v zstd &>/dev/null; then
@@ -867,13 +1262,30 @@ run_inspect() {
 run_backup() {
     local requested_layers="$1"
     local is_dry_run="$2"
+    local skip_confirm="$3"
     IS_DRY_RUN="$is_dry_run"
     DRY_FLAG=""
     SYNC_ERRORS=0
+
+    # If REMOTE is not set, prompt the user via select_storage_target
+    if [ -z "$REMOTE" ]; then
+        select_storage_target || true
+        if [ -z "$REMOTE" ]; then
+            echo -e "${RED}Error: No backup target specified. Use -r/--remote or configure DUMB_REMOTE in config/layers.conf.${NC}"
+            exit 1
+        fi
+    fi
+
     TRASH="${REMOTE}/Old-Versions/${DATE}"
     if [ "$IS_DRY_RUN" = "true" ]; then
         DRY_FLAG="--dry-run"
         echo -e "${YELLOW}>>> Running in DRY-RUN mode. No files will be modified or transferred. <<<${NC}\n"
+    fi
+
+    # If requested_layers is empty, prompt for layers
+    if [ -z "$requested_layers" ]; then
+        select_layers || true
+        requested_layers="$SELECTED_LAYERS"
     fi
 
     local active_engine
@@ -885,7 +1297,7 @@ run_backup() {
         fi
     else
         if ! command -v "$RSYNC_CMD" &> /dev/null; then
-            echo -e "${RED}Error: Target is a local path/pendrive, but rsync is not installed.${NC}"
+            echo -e "${RED}Error: Target is a local/remote path, but rsync is not installed.${NC}"
             exit 1
         fi
     fi
@@ -900,6 +1312,30 @@ run_backup() {
         for l in "${SPLIT[@]}"; do
             layers_to_run+=("$(echo "$l" | xargs)")
         done
+    fi
+
+    # Display Pre-Flight Summary and confirm before live run
+    if [ "$IS_DRY_RUN" != "true" ] && [ "$skip_confirm" != "true" ]; then
+        echo -e "\n${BLUE}=====================================================${NC}"
+        echo -e "${BOLD}  📋 BACKUP PRE-FLIGHT SUMMARY                        ${NC}"
+        echo -e "${BLUE}=====================================================${NC}"
+        echo -e "  • Target:         ${BOLD}${REMOTE}${NC}"
+        echo -e "  • Storage Engine: ${BOLD}${active_engine}${NC}"
+        local layer_summary=""
+        for l in "${layers_to_run[@]}"; do
+            local lname
+            lname="$(get_layer_name "$l")"
+            layer_summary+="${l} (${lname}), "
+        done
+        layer_summary="${layer_summary%, }"
+        echo -e "  • Layers:         ${BOLD}${layer_summary}${NC}"
+        echo -e "  • Safety Net:     ${TRASH}"
+        echo -e "${BLUE}=====================================================${NC}"
+        read -rp "Proceed with live backup? [y/N]: " confirm_backup || confirm_backup="n"
+        if [[ ! "$confirm_backup" =~ ^[Yy]$ ]]; then
+            echo -e "\n${YELLOW}Backup cancelled by user. No files were transferred.${NC}\n"
+            exit 0
+        fi
     fi
 
     for l in "${layers_to_run[@]}"; do
@@ -922,7 +1358,18 @@ run_backup() {
 run_restore() {
     local requested_layers="$1"
     local is_dry_run="$2"
+    local skip_confirm="$3"
     IS_DRY_RUN="$is_dry_run"
+
+    # If REMOTE is not set, prompt the user
+    if [ -z "$REMOTE" ]; then
+        select_storage_target || true
+        if [ -z "$REMOTE" ]; then
+            echo -e "${RED}Error: No restore target specified. Use -r/--remote or configure DUMB_REMOTE in config/layers.conf.${NC}"
+            exit 1
+        fi
+    fi
+
     TRASH="${REMOTE}/Old-Versions/${DATE}"
     local active_engine
     active_engine="$(detect_engine "$REMOTE")"
@@ -936,20 +1383,12 @@ run_restore() {
     echo -e "${BLUE}=====================================================${NC}\n"
 
     if [ -z "$requested_layers" ]; then
-        echo "Which layers would you like to restore onto this machine?"
-        for entry in "${AVAILABLE_LAYERS[@]}"; do
-            local lid="${entry%%|*}"
-            local rest="${entry#*|}"
-            local lname="${rest%%|*}"
-            local ldesc="${rest##*|}"
-            echo "  [${lid}] ${lname} (${ldesc})"
-        done
-        echo "  [A] All Layers"
-        read -rp "Select layers to restore [e.g. 1,3,4 or A]: " requested_layers
+        select_layers || true
+        requested_layers="$SELECTED_LAYERS"
     fi
 
     local layers_to_restore=()
-    if [[ "$requested_layers" =~ [Aa] ]]; then
+    if [ -z "$requested_layers" ] || [[ "$requested_layers" =~ [Aa] ]]; then
         for entry in "${AVAILABLE_LAYERS[@]}"; do
             layers_to_restore+=("${entry%%|*}")
         done
@@ -958,6 +1397,30 @@ run_restore() {
         for l in "${SPLIT[@]}"; do
             layers_to_restore+=("$(echo "$l" | xargs)")
         done
+    fi
+
+    # Pre-Flight summary for restore
+    if [ "$IS_DRY_RUN" != "true" ] && [ "$skip_confirm" != "true" ]; then
+        echo -e "\n${BLUE}=====================================================${NC}"
+        echo -e "${BOLD}  📋 RESTORE PRE-FLIGHT SUMMARY                       ${NC}"
+        echo -e "${BLUE}=====================================================${NC}"
+        echo -e "  • Source Target:  ${BOLD}${REMOTE}${NC}"
+        echo -e "  • Storage Engine: ${BOLD}${active_engine}${NC}"
+        local layer_summary=""
+        for l in "${layers_to_restore[@]}"; do
+            local lname
+            lname="$(get_layer_name "$l")"
+            layer_summary+="${l} (${lname}), "
+        done
+        layer_summary="${layer_summary%, }"
+        echo -e "  • Layers to sync: ${BOLD}${layer_summary}${NC}"
+        echo -e "  • Destination:    Current Workstation ($HOME)"
+        echo -e "${BLUE}=====================================================${NC}"
+        read -rp "Proceed with live restore onto this machine? [y/N]: " confirm_restore || confirm_restore="n"
+        if [[ ! "$confirm_restore" =~ ^[Yy]$ ]]; then
+            echo -e "\n${YELLOW}Restore cancelled. No files were modified.${NC}\n"
+            exit 0
+        fi
     fi
 
     for l in "${layers_to_restore[@]}"; do
@@ -975,11 +1438,22 @@ run_restore() {
 }
 
 # Parse CLI arguments
-cmd="${1:-backup}"
-shift || true
+if [[ "$1" =~ ^(-h|--help)$ ]]; then
+    usage
+elif [[ "$1" =~ ^(-v|--version)$ ]]; then
+    echo "DUMB version ${VERSION}"
+    exit 0
+elif [[ "$1" =~ ^- ]]; then
+    cmd="menu"
+else
+    cmd="${1:-menu}"
+    shift || true
+fi
 
 TARGET_LAYERS=""
 DRY_RUN="false"
+SKIP_CONFIRM="false"
+POSITIONAL_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -996,49 +1470,58 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN="true"
             shift
             ;;
+        -y|--yes)
+            SKIP_CONFIRM="true"
+            shift
+            ;;
         -h|--help)
             usage
             ;;
         *)
-            EXTRA_ARG="$1"
+            POSITIONAL_ARGS+=("$1")
             shift
             ;;
     esac
 done
 
-# Ensure TRASH is strictly synchronized with finalized REMOTE
-TRASH="${REMOTE}/Old-Versions/${DATE}"
+[ -n "$REMOTE" ] && TRASH="${REMOTE}/Old-Versions/${DATE}"
 
 case "$cmd" in
+    menu)
+        run_menu
+        ;;
     init)
         run_init
         ;;
     backup)
         print_banner
-        run_backup "$TARGET_LAYERS" "$DRY_RUN"
+        run_backup "${TARGET_LAYERS:-${POSITIONAL_ARGS[0]:-}}" "$DRY_RUN" "$SKIP_CONFIRM"
         ;;
     bundle)
-        run_bundle "$EXTRA_ARG"
+        run_bundle "${POSITIONAL_ARGS[0]:-}"
         ;;
     unbundle)
-        run_unbundle "$EXTRA_ARG"
+        run_unbundle "${POSITIONAL_ARGS[0]:-}"
         ;;
     explain)
         run_explain
         ;;
     restore)
         print_banner
-        run_restore "$TARGET_LAYERS" "$DRY_RUN"
+        run_restore "${TARGET_LAYERS:-${POSITIONAL_ARGS[0]:-}}" "$DRY_RUN" "$SKIP_CONFIRM"
         ;;
     inspect)
         run_inspect
         ;;
     check)
         print_banner
-        run_backup "$TARGET_LAYERS" "true"
+        run_backup "${TARGET_LAYERS:-${POSITIONAL_ARGS[0]:-}}" "true" "true"
         ;;
     status)
         run_status
+        ;;
+    add)
+        run_add "${POSITIONAL_ARGS[0]:-$TARGET_LAYERS}" "${POSITIONAL_ARGS[1]:-}"
         ;;
     version|--version|-v)
         echo "DUMB version ${VERSION}"
