@@ -113,7 +113,14 @@ dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault  # USB Pendrive (offline, na
 dumb backup -r $HOME/Nextcloud/DUMB-Vault            # Nextcloud / Dropbox sync folder
 dumb backup -r gdrive:Ajaz-Backup-Hub                # Google Drive (cloud rclone)
 
-# 5. Restore onto a fresh OS (interactive checklist or flag-driven)
+# 5. Show exact WHAT, WHERE, and HOW breakdown
+dumb explain
+
+# 6. Create a single-file portable archive on a USB Pendrive
+dumb bundle /run/media/$USER/PENDRIVE/my-workstation.tar.zst
+dumb unbundle /run/media/$USER/PENDRIVE/my-workstation.tar.zst
+
+# 7. Restore onto a fresh OS (interactive checklist or flag-driven)
 dumb restore
 dumb restore --layers 1,3,4      # Restore Personal, Browser Logins, and Dotfiles
 ```
