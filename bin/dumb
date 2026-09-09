@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -15,9 +15,9 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+BOLD='\033[1m'
 NC='\033[0m'
 
-# Source default configuration
 CONFIG_FILE="${PROJECT_ROOT}/config/layers.conf"
 if [ -f "$CONFIG_FILE" ]; then
     # shellcheck source=/dev/null
@@ -27,14 +27,11 @@ fi
 REMOTE="${DUMB_REMOTE:-gdrive:Ajaz-Backup-Hub}"
 DATE=$(date +%Y-%m-%d)
 TRASH="${REMOTE}/Old-Versions/${DATE}"
-DRY_RUN_FLAG=""
+BROWSER_PRESET="${DUMB_BROWSER_PRESET:-firefox}"
+HARDWARE_PRESET="${DUMB_HARDWARE_PRESET:-asus-rog}"
 
 # Detect rclone
 RCLONE_CMD="$(command -v rclone 2>/dev/null || echo "$HOME/.local/bin/rclone")"
-if ! command -v "$RCLONE_CMD" &> /dev/null; then
-    echo -e "${RED}Error: rclone is not installed or not found in PATH.${NC}"
-    exit 1
-fi
 
 print_banner() {
     echo -e "${BLUE}=====================================================${NC}"
@@ -42,12 +39,15 @@ print_banner() {
     echo -e "${BLUE}  Version:   v${VERSION}                                  ${NC}"
     echo -e "${BLUE}  Target:    ${REMOTE}                             ${NC}"
     echo -e "${BLUE}  Safety:    ${TRASH}                             ${NC}"
+    echo -e "${BLUE}  Browser:   ${BROWSER_PRESET}                    ${NC}"
+    echo -e "${BLUE}  Hardware:  ${HARDWARE_PRESET}                   ${NC}"
     echo -e "${BLUE}=====================================================${NC}"
 }
 
 usage() {
     echo -e "Usage: dumb [COMMAND] [OPTIONS]\n"
     echo -e "Commands:"
+    echo -e "  init         Run interactive setup wizard to configure your workstation"
     echo -e "  backup       Run the full 6-layer workstation backup"
     echo -e "  check        Dry-run inspection of what would be backed up"
     echo -e "  status       Show current backup configuration and remote state"
@@ -59,12 +59,82 @@ usage() {
     exit 0
 }
 
+run_init() {
+    echo -e "${BLUE}=====================================================${NC}"
+    echo -e "${BOLD}  🥱 DUMB Workstation Setup Wizard                    ${NC}"
+    echo -e "${BLUE}=====================================================${NC}\n"
+    echo -e "Let's configure DUMB for your machine in 4 quick steps.\n"
+
+    # Step 1: Projects Directory
+    echo -e "${BOLD}1. Where do you store your source code / projects?${NC}"
+    read -rp "   Path [default: $HOME/Projects]: " input_projects
+    PROJECTS_PATH="${input_projects:-$HOME/Projects}"
+
+    # Step 2: Browser Preset
+    echo -e "\n${BOLD}2. Which browser do you want to keep persistently logged in?${NC}"
+    echo "   [1] Mozilla Firefox (default)"
+    echo "   [2] Brave Browser"
+    echo "   [3] Google Chrome / Chromium"
+    echo "   [4] None (skip browser profile)"
+    read -rp "   Choice [1-4, default: 1]: " input_browser
+    case "$input_browser" in
+        2) BROWSER_CHOICE="brave" ;;
+        3) BROWSER_CHOICE="chrome" ;;
+        4) BROWSER_CHOICE="none" ;;
+        *) BROWSER_CHOICE="firefox" ;;
+    esac
+
+    # Step 3: Hardware Preset
+    echo -e "\n${BOLD}3. What hardware profile fits this machine?${NC}"
+    echo "   [1] ASUS ROG Laptop (fan curves, thermal tuning) (default)"
+    echo "   [2] Lenovo ThinkPad (thinkfan, TLP thresholds)"
+    echo "   [3] Generic PC / Other Laptop (fonts, systemd user units)"
+    echo "   [4] None (skip hardware blueprint)"
+    read -rp "   Choice [1-4, default: 1]: " input_hardware
+    case "$input_hardware" in
+        2) HARDWARE_CHOICE="thinkpad" ;;
+        3) HARDWARE_CHOICE="generic" ;;
+        4) HARDWARE_CHOICE="none" ;;
+        *) HARDWARE_CHOICE="asus-rog" ;;
+    esac
+
+    # Step 4: Storage Remote
+    echo -e "\n${BOLD}4. Where would you like to save your backups?${NC}"
+    echo "   Examples:"
+    echo "     - Cloud:      gdrive:Ajaz-Backup-Hub or onedrive:Workstation"
+    echo "     - Local USB:  /run/media/$USER/MyDrive/DUMB-Vault"
+    echo "     - Local NAS:  /mnt/nas/backups"
+    read -rp "   Target Remote [default: gdrive:Ajaz-Backup-Hub]: " input_remote
+    REMOTE_CHOICE="${input_remote:-gdrive:Ajaz-Backup-Hub}"
+
+    # Generate config/layers.conf
+    cat << CFG > "$CONFIG_FILE"
+# ==============================================================================
+# DUMB — Generated Workstation Configuration
+# ==============================================================================
+
+DUMB_REMOTE="${REMOTE_CHOICE}"
+DUMB_PROJECTS_DIR="${PROJECTS_PATH}"
+DUMB_BROWSER_PRESET="${BROWSER_CHOICE}"
+DUMB_HARDWARE_PRESET="${HARDWARE_CHOICE}"
+CFG
+
+    echo -e "\n${GREEN}✅ Configuration saved successfully to:${NC} ${CONFIG_FILE}"
+    echo -e "You can now run: ${BOLD}dumb check${NC} (for dry-run) or ${BOLD}dumb backup${NC} (to sync)!\n"
+    exit 0
+}
+
 run_backup() {
     local is_dry_run="$1"
     local dry_flag=""
     if [ "$is_dry_run" = "true" ]; then
         dry_flag="--dry-run"
         echo -e "${YELLOW}>>> Running in DRY-RUN mode. No files will be modified or transferred. <<<${NC}\n"
+    fi
+
+    if ! command -v "$RCLONE_CMD" &> /dev/null; then
+        echo -e "${RED}Error: rclone is required for storage transport.${NC}"
+        exit 1
     fi
 
     # 1. Personal Files
@@ -76,11 +146,14 @@ run_backup() {
     [ -d "$HOME/Pictures" ] && "$RCLONE_CMD" sync "$HOME/Pictures" "${REMOTE}/01-Personal-Files/Pictures" \
         --backup-dir "${TRASH}/01-Personal-Files/Pictures" --fast-list --links $dry_flag
 
-    [ -d "$HOME/Projects" ] && "$RCLONE_CMD" sync "$HOME/Projects" "${REMOTE}/01-Personal-Files/Projects" \
-        --backup-dir "${TRASH}/01-Personal-Files/Projects" \
-        --exclude ".venv/**" --exclude "venv/**" --exclude "node_modules/**" \
-        --exclude "__pycache__/**" --exclude "target/**" --exclude "build/**" \
-        --fast-list --links $dry_flag
+    local projects_dir="${DUMB_PROJECTS_DIR:-$HOME/Projects}"
+    if [ -d "$projects_dir" ]; then
+        "$RCLONE_CMD" sync "$projects_dir" "${REMOTE}/01-Personal-Files/Projects" \
+            --backup-dir "${TRASH}/01-Personal-Files/Projects" \
+            --exclude ".venv/**" --exclude "venv/**" --exclude "node_modules/**" \
+            --exclude "__pycache__/**" --exclude "target/**" --exclude "build/**" \
+            --fast-list --links $dry_flag
+    fi
 
     # 2. Clean dot-config
     echo -e "\n${GREEN}[Layer 2/6] Clean App Configurations (~/.config)...${NC}"
@@ -90,23 +163,37 @@ run_backup() {
             --exclude "*Cache*/**" --exclude "*cache*/**" --exclude "*GPUCache*/**" \
             --exclude "*Code Cache*/**" --exclude "*CacheStorage*/**" \
             --exclude "*blob_storage*/**" --exclude "mozilla/**" \
+            --exclude "BraveSoftware/**" --exclude "google-chrome/**" \
             --exclude "*.lock" --exclude "*.sock" --exclude "dconf/user" \
             --fast-list --links $dry_flag
     fi
 
-    # 3. Browser Session Vault
-    echo -e "\n${GREEN}[Layer 3/6] Browser Session Vault (Persistent Logins)...${NC}"
-    if [ -d "$HOME/.config/mozilla/firefox" ]; then
-        "$RCLONE_CMD" sync "$HOME/.config/mozilla/firefox" "${REMOTE}/03-Browser-Vault" \
-            --backup-dir "${TRASH}/03-Browser-Vault" \
-            --exclude "**/cache2/**" --exclude "**/jumpListCache/**" \
-            --exclude "**/Crash Reports/**" --exclude "**/Pending Pings/**" \
-            --fast-list --links $dry_flag
-    elif [ -d "$HOME/.mozilla/firefox" ]; then
-        "$RCLONE_CMD" sync "$HOME/.mozilla/firefox" "${REMOTE}/03-Browser-Vault" \
-            --backup-dir "${TRASH}/03-Browser-Vault" \
-            --exclude "**/cache2/**" --exclude "**/jumpListCache/**" \
-            --fast-list --links $dry_flag
+    # 3. Browser Session Vault (Dynamic Preset)
+    echo -e "\n${GREEN}[Layer 3/6] Browser Session Vault (Preset: ${BROWSER_PRESET})...${NC}"
+    local browser_preset_file="${PROJECT_ROOT}/presets/browsers/${BROWSER_PRESET}.conf"
+    if [ "$BROWSER_PRESET" != "none" ] && [ -f "$browser_preset_file" ]; then
+        # shellcheck source=/dev/null
+        source "$browser_preset_file"
+        local found_browser=""
+        for b_path in "${BROWSER_PATHS[@]}"; do
+            if [ -d "$b_path" ]; then
+                found_browser="$b_path"
+                break
+            fi
+        done
+        if [ -n "$found_browser" ]; then
+            local exclude_args=()
+            for exc in "${BROWSER_EXCLUDES[@]}"; do
+                exclude_args+=(--exclude "$exc")
+            done
+            "$RCLONE_CMD" sync "$found_browser" "${REMOTE}/03-Browser-Vault" \
+                --backup-dir "${TRASH}/03-Browser-Vault" \
+                "${exclude_args[@]}" --fast-list --links $dry_flag
+        else
+            echo "   No active profile directory found for ${BROWSER_NAME}. Skipping."
+        fi
+    else
+        echo "   Browser preset set to 'none' or preset file missing. Skipping."
     fi
 
     # 4. Home Dotfiles & Local Binaries
@@ -137,11 +224,24 @@ run_backup() {
             --fast-list --links $dry_flag
     fi
 
-    # 6. Hardware Blueprint & Fonts
-    echo -e "\n${GREEN}[Layer 6/6] Hardware Blueprint & System Fonts...${NC}"
-    if [ -d "$HOME/Nobara-Blueprint" ]; then
-        "$RCLONE_CMD" sync "$HOME/Nobara-Blueprint" "${REMOTE}/06-Hardware-Blueprint" \
-            --backup-dir "${TRASH}/06-Hardware-Blueprint" --fast-list --links $dry_flag
+    # 6. Hardware Blueprint & Fonts (Dynamic Preset)
+    echo -e "\n${GREEN}[Layer 6/6] Hardware Blueprint (Preset: ${HARDWARE_PRESET})...${NC}"
+    local hw_preset_file="${PROJECT_ROOT}/presets/hardware/${HARDWARE_PRESET}.conf"
+    if [ "$HARDWARE_PRESET" != "none" ] && [ -f "$hw_preset_file" ]; then
+        # shellcheck source=/dev/null
+        source "$hw_preset_file"
+        for hw_path in "${HARDWARE_PATHS[@]}"; do
+            if [ -e "$hw_path" ]; then
+                local bname
+                bname="$(basename "$hw_path")"
+                if [ -d "$hw_path" ]; then
+                    "$RCLONE_CMD" sync "$hw_path" "${REMOTE}/06-Hardware-Blueprint/${bname}" \
+                        --backup-dir "${TRASH}/06-Hardware-Blueprint/${bname}" --fast-list --links $dry_flag
+                else
+                    "$RCLONE_CMD" copy "$hw_path" "${REMOTE}/06-Hardware-Blueprint/" $dry_flag
+                fi
+            fi
+        done
     fi
 
     if [ -d "$HOME/.local/share/fonts/JetBrainsMono" ]; then
@@ -161,6 +261,9 @@ run_backup() {
 cmd="${1:-backup}"
 
 case "$cmd" in
+    init)
+        run_init
+        ;;
     backup)
         print_banner
         run_backup "false"
