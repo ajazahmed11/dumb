@@ -47,7 +47,7 @@ DUMB is designed to be completely modular, not locked to any single tool or clou
 │ 2. THE ENGINE (Pluggable Transport)                      │
 │    • rclone    (Multi-cloud: GDrive, OneDrive, Proton, S3)│
 │    • rsync     (Ultra-fast local USB drives, SSH, NAS)   │
-│    • restic    (Encrypted deduplicated snapshots)        │
+│    • restic    (Planned: Deduplicated snapshots)         │
 └────────────────────────────┬─────────────────────────────┘
                              ▼
 ┌──────────────────────────────────────────────────────────┐
@@ -78,7 +78,7 @@ DUMB Vault
 | **01: Personal** | `~/Documents`, `~/Projects`, `~/Pictures` | Code, notes, academic archives | `.venv/`, `node_modules/`, `target/`, `build/`, `__pycache__/` |
 | **02: Config** | `~/.config` | Terminal, editor, desktop settings | `*Cache*`, `*GPUCache*`, `*blob_storage*`, `*.lock`, `*.sock` |
 | **03: Browser** | Firefox / Chromium profiles | `cookies.sqlite`, `storage/`, active sessions | `cache2/`, `jumpListCache/`, crash dumps |
-| **04: Dotfiles** | `~/.bashrc`, `~/.gitconfig`, `~/.local/bin` | Custom shell utilities, aliases, scripts | Heavy precompiled binaries (`rclone`, `agy`) |
+| **04: Dotfiles** | `~/.bashrc`, `~/.gitconfig`, `~/.local/bin` | Declarative `DOTFILES` array (`.bashrc`, `.zshrc`, `.tmux.conf`), custom scripts | Heavy precompiled binaries (`rclone`, `agy`) |
 | **05: AI Agents** | `~/.gemini`, `~/.claude`, `~/.codex` | Brain contexts, memories, session logs | Ephemeral daemon sockets, runtime caches, API tokens |
 | **06: Hardware** | Blueprint recipes & fonts | Fan curves (`asusd`), CPU boost service, fonts | Machine-locked system state |
 
