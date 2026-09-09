@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# DUMB — DUMB's Universal Migration & Backup
+# A zero-bloat, distro-agnostic workstation migration framework.
+# ==============================================================================
+
+set -eo pipefail
+
+VERSION="0.1.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Colors
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+# Source default configuration
+CONFIG_FILE="${PROJECT_ROOT}/config/layers.conf"
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+fi
+
+REMOTE="${DUMB_REMOTE:-gdrive:Ajaz-Backup-Hub}"
+DATE=$(date +%Y-%m-%d)
+TRASH="${REMOTE}/Old-Versions/${DATE}"
+DRY_RUN_FLAG=""
+
+# Detect rclone
+RCLONE_CMD="$(command -v rclone 2>/dev/null || echo "$HOME/.local/bin/rclone")"
+if ! command -v "$RCLONE_CMD" &> /dev/null; then
+    echo -e "${RED}Error: rclone is not installed or not found in PATH.${NC}"
+    exit 1
+fi
+
+print_banner() {
+    echo -e "${BLUE}=====================================================${NC}"
+    echo -e "${BLUE}  🥱 DUMB — DUMB's Universal Migration & Backup     ${NC}"
+    echo -e "${BLUE}  Version:   v${VERSION}                                  ${NC}"
+    echo -e "${BLUE}  Target:    ${REMOTE}                             ${NC}"
+    echo -e "${BLUE}  Safety:    ${TRASH}                             ${NC}"
+    echo -e "${BLUE}=====================================================${NC}"
+}
+
+usage() {
+    echo -e "Usage: dumb [COMMAND] [OPTIONS]\n"
+    echo -e "Commands:"
+    echo -e "  backup       Run the full 6-layer workstation backup"
+    echo -e "  check        Dry-run inspection of what would be backed up"
+    echo -e "  status       Show current backup configuration and remote state"
+    echo -e "  version      Print DUMB version"
+    echo -e "  help         Display this help message\n"
+    echo -e "Options:"
+    echo -e "  -r, --remote <dest>   Override target remote (default: \$DUMB_REMOTE)"
+    echo -e "  -h, --help            Show help"
+    exit 0
+}
+
+run_backup() {
+    local is_dry_run="$1"
+    local dry_flag=""
+    if [ "$is_dry_run" = "true" ]; then
+        dry_flag="--dry-run"
+        echo -e "${YELLOW}>>> Running in DRY-RUN mode. No files will be modified or transferred. <<<${NC}\n"
+    fi
+
+    # 1. Personal Files
+    echo -e "${GREEN}[Layer 1/6] Personal Files (Documents, Pictures, Projects)...${NC}"
+    [ -d "$HOME/Documents" ] && "$RCLONE_CMD" sync "$HOME/Documents" "${REMOTE}/01-Personal-Files/Documents" \
+        --backup-dir "${TRASH}/01-Personal-Files/Documents" \
+        --exclude ".git/**" --exclude "__pycache__/**" --fast-list --links $dry_flag
+
+    [ -d "$HOME/Pictures" ] && "$RCLONE_CMD" sync "$HOME/Pictures" "${REMOTE}/01-Personal-Files/Pictures" \
+        --backup-dir "${TRASH}/01-Personal-Files/Pictures" --fast-list --links $dry_flag
+
+    [ -d "$HOME/Projects" ] && "$RCLONE_CMD" sync "$HOME/Projects" "${REMOTE}/01-Personal-Files/Projects" \
+        --backup-dir "${TRASH}/01-Personal-Files/Projects" \
+        --exclude ".venv/**" --exclude "venv/**" --exclude "node_modules/**" \
+        --exclude "__pycache__/**" --exclude "target/**" --exclude "build/**" \
+        --fast-list --links $dry_flag
+
+    # 2. Clean dot-config
+    echo -e "\n${GREEN}[Layer 2/6] Clean App Configurations (~/.config)...${NC}"
+    if [ -d "$HOME/.config" ]; then
+        "$RCLONE_CMD" sync "$HOME/.config" "${REMOTE}/02-dot-config" \
+            --backup-dir "${TRASH}/02-dot-config" \
+            --exclude "*Cache*/**" --exclude "*cache*/**" --exclude "*GPUCache*/**" \
+            --exclude "*Code Cache*/**" --exclude "*CacheStorage*/**" \
+            --exclude "*blob_storage*/**" --exclude "mozilla/**" \
+            --exclude "*.lock" --exclude "*.sock" --exclude "dconf/user" \
+            --fast-list --links $dry_flag
+    fi
+
+    # 3. Browser Session Vault
+    echo -e "\n${GREEN}[Layer 3/6] Browser Session Vault (Persistent Logins)...${NC}"
+    if [ -d "$HOME/.config/mozilla/firefox" ]; then
+        "$RCLONE_CMD" sync "$HOME/.config/mozilla/firefox" "${REMOTE}/03-Browser-Vault" \
+            --backup-dir "${TRASH}/03-Browser-Vault" \
+            --exclude "**/cache2/**" --exclude "**/jumpListCache/**" \
+            --exclude "**/Crash Reports/**" --exclude "**/Pending Pings/**" \
+            --fast-list --links $dry_flag
+    elif [ -d "$HOME/.mozilla/firefox" ]; then
+        "$RCLONE_CMD" sync "$HOME/.mozilla/firefox" "${REMOTE}/03-Browser-Vault" \
+            --backup-dir "${TRASH}/03-Browser-Vault" \
+            --exclude "**/cache2/**" --exclude "**/jumpListCache/**" \
+            --fast-list --links $dry_flag
+    fi
+
+    # 4. Home Dotfiles & Local Binaries
+    echo -e "\n${GREEN}[Layer 4/6] Home Dotfiles & Custom Scripts...${NC}"
+    [ -f "$HOME/.bashrc" ] && "$RCLONE_CMD" copy "$HOME/.bashrc" "${REMOTE}/04-Home-Dotfiles/" $dry_flag
+    [ -f "$HOME/.gitconfig" ] && "$RCLONE_CMD" copy "$HOME/.gitconfig" "${REMOTE}/04-Home-Dotfiles/" $dry_flag
+    [ -f "$HOME/.profile" ] && "$RCLONE_CMD" copy "$HOME/.profile" "${REMOTE}/04-Home-Dotfiles/" $dry_flag
+    [ -f "$HOME/.zshrc" ] && "$RCLONE_CMD" copy "$HOME/.zshrc" "${REMOTE}/04-Home-Dotfiles/" $dry_flag
+
+    if [ -d "$HOME/.local/bin" ]; then
+        "$RCLONE_CMD" sync "$HOME/.local/bin" "${REMOTE}/04-Home-Dotfiles/local-bin" \
+            --backup-dir "${TRASH}/04-Home-Dotfiles/local-bin" \
+            --exclude "agy" --exclude "rclone" --fast-list --links $dry_flag
+    fi
+
+    # 5. AI Agent Vault
+    echo -e "\n${GREEN}[Layer 5/6] AI Agent Vault (Antigravity & Claude)...${NC}"
+    if [ -d "$HOME/.gemini/antigravity-cli" ]; then
+        "$RCLONE_CMD" sync "$HOME/.gemini/antigravity-cli" "${REMOTE}/05-AI-Agent-Vault/gemini/antigravity-cli" \
+            --backup-dir "${TRASH}/05-AI-Agent-Vault/gemini/antigravity-cli" \
+            --exclude "*.log" --exclude "antigravity-oauth-token" --fast-list --links $dry_flag
+    fi
+
+    if [ -d "$HOME/.claude" ]; then
+        "$RCLONE_CMD" sync "$HOME/.claude" "${REMOTE}/05-AI-Agent-Vault/claude" \
+            --backup-dir "${TRASH}/05-AI-Agent-Vault/claude" \
+            --exclude "cache/**" --exclude "daemon/**" --exclude "downloads/**" \
+            --fast-list --links $dry_flag
+    fi
+
+    # 6. Hardware Blueprint & Fonts
+    echo -e "\n${GREEN}[Layer 6/6] Hardware Blueprint & System Fonts...${NC}"
+    if [ -d "$HOME/Nobara-Blueprint" ]; then
+        "$RCLONE_CMD" sync "$HOME/Nobara-Blueprint" "${REMOTE}/06-Hardware-Blueprint" \
+            --backup-dir "${TRASH}/06-Hardware-Blueprint" --fast-list --links $dry_flag
+    fi
+
+    if [ -d "$HOME/.local/share/fonts/JetBrainsMono" ]; then
+        "$RCLONE_CMD" sync "$HOME/.local/share/fonts/JetBrainsMono" "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" \
+            --backup-dir "${TRASH}/06-Hardware-Blueprint/fonts/JetBrainsMono" --fast-list --links $dry_flag
+    fi
+
+    echo -e "\n${BLUE}=====================================================${NC}"
+    if [ "$is_dry_run" = "true" ]; then
+        echo -e "${YELLOW}  🔍 Dry-run check completed! No errors encountered.${NC}"
+    else
+        echo -e "${GREEN}  ✅ DUMB Backup Completed Successfully!             ${NC}"
+    fi
+    echo -e "${BLUE}=====================================================${NC}\n"
+}
+
+cmd="${1:-backup}"
+
+case "$cmd" in
+    backup)
+        print_banner
+        run_backup "false"
+        ;;
+    check)
+        print_banner
+        run_backup "true"
+        ;;
+    status)
+        print_banner
+        echo -e "\nConfigured Target Remote: ${REMOTE}"
+        echo -e "Testing connection..."
+        if "$RCLONE_CMD" lsd "${REMOTE}" &>/dev/null; then
+            echo -e "${GREEN}Connection status: ONLINE${NC}"
+            echo -e "\nActive Layers on Remote:"
+            "$RCLONE_CMD" lsf "${REMOTE}"
+        else
+            echo -e "${RED}Connection status: OFFLINE or remote unreachable.${NC}"
+        fi
+        ;;
+    version|--version|-v)
+        echo "DUMB version ${VERSION}"
+        ;;
+    help|--help|-h)
+        usage
+        ;;
+    *)
+        echo -e "${RED}Unknown command: $cmd${NC}\n"
+        usage
+        ;;
+esac

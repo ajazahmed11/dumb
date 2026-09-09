@@ -1,0 +1,17 @@
+# Logs & runtime artifacts
+*.log
+*.tmp
+*.sock
+*.lock
+
+# OS & Editor files
+.DS_Store
+.vscode/
+.idea/
+*~
+
+# Python cache if extensions are added
+__pycache__/
+*.py[cod]
+.venv/
+venv/
