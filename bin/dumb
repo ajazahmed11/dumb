@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-VERSION="0.7.0"
+VERSION="0.7.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -29,6 +29,16 @@ DATE=$(date +%Y-%m-%d)
 TRASH="${REMOTE}/Old-Versions/${DATE}"
 BROWSER_PRESET="${DUMB_BROWSER_PRESET:-firefox}"
 HARDWARE_PRESET="${DUMB_HARDWARE_PRESET:-asus-rog}"
+
+# Default fallback for Layer 4 dotfiles if undefined in config
+if [ -z "${DOTFILES+x}" ] || [ ${#DOTFILES[@]} -eq 0 ]; then
+    DOTFILES=(
+        "$HOME/.bashrc"
+        "$HOME/.gitconfig"
+        "$HOME/.profile"
+        "$HOME/.zshrc"
+    )
+fi
 
 # Detect available engines
 RCLONE_CMD="$(command -v rclone 2>/dev/null || echo "$HOME/.local/bin/rclone")"
@@ -162,8 +172,13 @@ run_explain() {
     echo "     - $HOME/.config (Excludes: GPUCache, blob_storage, sockets, locks)"
     echo "   • Layer 3 (Browser Session Vault):"
     echo "     - Preset '${BROWSER_PRESET}' (Preserves cookies & logins, strips disposable cache2/)"
-    echo "   • Layer 4 (Home Dotfiles):"
-    echo "     - Shell configs (~/.bashrc, ~/.gitconfig, ~/.profile, ~/.zshrc) and ~/.local/bin scripts"
+    echo "   • Layer 4 (Home Dotfiles & Local Scripts):"
+    echo "     - Tracked dotfiles:"
+    for df in "${DOTFILES[@]}"; do
+        local df_exp="${df/#\~/$HOME}"
+        [ -f "$df_exp" ] && echo "       • $df_exp"
+    done
+    [ -d "$HOME/.local/bin" ] && echo "     - Custom user scripts: $HOME/.local/bin"
     echo "   • Layer 5 (AI Agent Vault):"
     for a in "${AI_AGENT_DIRS[@]}"; do
         local aname="${a%%:*}"
@@ -620,10 +635,13 @@ run_backup() {
 
     # 4. Home Dotfiles & Local Binaries
     echo -e "\n${GREEN}[Layer 4/6] Home Dotfiles & Custom Scripts...${NC}"
-    [ -f "$HOME/.bashrc" ] && dumb_copy "$HOME/.bashrc" "${REMOTE}/04-Home-Dotfiles/"
-    [ -f "$HOME/.gitconfig" ] && dumb_copy "$HOME/.gitconfig" "${REMOTE}/04-Home-Dotfiles/"
-    [ -f "$HOME/.profile" ] && dumb_copy "$HOME/.profile" "${REMOTE}/04-Home-Dotfiles/"
-    [ -f "$HOME/.zshrc" ] && dumb_copy "$HOME/.zshrc" "${REMOTE}/04-Home-Dotfiles/"
+    for df in "${DOTFILES[@]}"; do
+        local df_exp="${df/#\~/$HOME}"
+        if [ -f "$df_exp" ]; then
+            echo "   • Syncing dotfile: $df_exp"
+            dumb_copy "$df_exp" "${REMOTE}/04-Home-Dotfiles/"
+        fi
+    done
 
     if [ -d "$HOME/.local/bin" ]; then
         dumb_sync "$HOME/.local/bin" "${REMOTE}/04-Home-Dotfiles/local-bin" \
@@ -720,6 +738,23 @@ run_restore() {
         fi
     }
 
+    restore_file() {
+        local src="$1"
+        local dst="$2"
+        if [ "$is_dry_run" = "true" ]; then
+            echo -e "   ${YELLOW}[DRY-RUN] Would restore file:${NC} $src -> $dst"
+            return 0
+        fi
+        mkdir -p "$(dirname "$dst")"
+        if [ "$active_engine" = "rclone" ]; then
+            "$RCLONE_CMD" copyto "$src" "$dst" 2>/dev/null || true
+        else
+            if [ -f "$src" ]; then
+                "$RSYNC_CMD" -a "$src" "$dst" 2>/dev/null || true
+            fi
+        fi
+    }
+
     restore_layer() {
         local layer_num="$1"
         case "$layer_num" in
@@ -751,10 +786,12 @@ run_restore() {
                 ;;
             4)
                 echo -e "\n${GREEN}[Restoring Layer 4] Dotfiles & Local Scripts...${NC}"
-                restore_copy "${REMOTE}/04-Home-Dotfiles/.bashrc" "$HOME/.bashrc"
-                restore_copy "${REMOTE}/04-Home-Dotfiles/.gitconfig" "$HOME/.gitconfig"
-                restore_copy "${REMOTE}/04-Home-Dotfiles/.profile" "$HOME/.profile"
-                restore_copy "${REMOTE}/04-Home-Dotfiles/.zshrc" "$HOME/.zshrc"
+                for df in "${DOTFILES[@]}"; do
+                    local df_exp="${df/#\~/$HOME}"
+                    local bname
+                    bname="$(basename "$df_exp")"
+                    restore_file "${REMOTE}/04-Home-Dotfiles/${bname}" "$df_exp"
+                done
                 mkdir -p "$HOME/.local/bin"
                 restore_copy "${REMOTE}/04-Home-Dotfiles/local-bin" "$HOME/.local/bin"
                 ;;
@@ -805,7 +842,7 @@ run_restore() {
 cmd="${1:-backup}"
 shift || true
 
-DRY_RUN_RESTORE="false"
+DRY_RUN="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -818,7 +855,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -n|--dry-run)
-            DRY_RUN_RESTORE="true"
+            DRY_RUN="true"
             shift
             ;;
         -h|--help)
@@ -837,7 +874,7 @@ case "$cmd" in
         ;;
     backup)
         print_banner
-        run_backup "false"
+        run_backup "$DRY_RUN"
         ;;
     bundle)
         run_bundle "$EXTRA_ARG"
@@ -850,7 +887,7 @@ case "$cmd" in
         ;;
     restore)
         print_banner
-        run_restore "$RESTORE_LAYERS" "$DRY_RUN_RESTORE"
+        run_restore "$RESTORE_LAYERS" "$DRY_RUN"
         ;;
     inspect)
         run_inspect
