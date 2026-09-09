@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-VERSION="0.8.0"
+VERSION="0.8.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -101,6 +101,7 @@ detect_engine() {
 }
 
 print_banner() {
+    TRASH="${REMOTE}/Old-Versions/${DATE}"
     local active_engine
     active_engine="$(detect_engine "$REMOTE")"
     echo -e "${BLUE}=====================================================${NC}"
@@ -158,7 +159,11 @@ dumb_sync() {
         for exc in "${excludes[@]}"; do
             exc_args+=(--exclude "$exc")
         done
-        "$RCLONE_CMD" sync "$src" "$dst" --backup-dir "$trash" "${exc_args[@]}" --fast-list --links $DRY_FLAG
+        if ! "$RCLONE_CMD" sync "$src" "$dst" --backup-dir "$trash" "${exc_args[@]}" --fast-list --links $DRY_FLAG; then
+            echo -e "${RED}   ✖ rclone error syncing: $src -> $dst${NC}"
+            SYNC_ERRORS=$((SYNC_ERRORS + 1))
+            return 1
+        fi
     else
         if [ -z "$RSYNC_CMD" ]; then
             echo -e "${RED}Error: rsync is required for local/pendrive sync but not found.${NC}"
@@ -171,7 +176,11 @@ dumb_sync() {
         done
         local rsync_dry=""
         [ "$IS_DRY_RUN" = "true" ] && rsync_dry="-n"
-        "$RSYNC_CMD" -a --delete --backup --backup-dir="$trash" "${exc_args[@]}" "$src/" "$dst/" $rsync_dry
+        if ! "$RSYNC_CMD" -a --delete --backup --backup-dir="$trash" "${exc_args[@]}" "$src/" "$dst/" $rsync_dry; then
+            echo -e "${RED}   ✖ rsync error syncing: $src -> $dst${NC}"
+            SYNC_ERRORS=$((SYNC_ERRORS + 1))
+            return 1
+        fi
     fi
 }
 
@@ -182,7 +191,11 @@ dumb_copy() {
     engine="$(detect_engine "$dst")"
 
     if [ "$engine" = "rclone" ]; then
-        "$RCLONE_CMD" copy "$src" "$dst" $DRY_FLAG
+        if ! "$RCLONE_CMD" copy "$src" "$dst" $DRY_FLAG; then
+            echo -e "${RED}   ✖ rclone error copying: $src -> $dst${NC}"
+            SYNC_ERRORS=$((SYNC_ERRORS + 1))
+            return 1
+        fi
     else
         if [ -z "$RSYNC_CMD" ]; then
             echo -e "${RED}Error: rsync is required for local copying.${NC}"
@@ -191,7 +204,11 @@ dumb_copy() {
         mkdir -p "$dst"
         local rsync_dry=""
         [ "$IS_DRY_RUN" = "true" ] && rsync_dry="-n"
-        "$RSYNC_CMD" -a "$src" "$dst/" $rsync_dry
+        if ! "$RSYNC_CMD" -a "$src" "$dst/" $rsync_dry; then
+            echo -e "${RED}   ✖ rsync error copying: $src -> $dst${NC}"
+            SYNC_ERRORS=$((SYNC_ERRORS + 1))
+            return 1
+        fi
     fi
 }
 
@@ -761,7 +778,7 @@ run_bundle() {
     local temp_stage
     temp_stage="$(mktemp -d /tmp/dumb-stage-XXXXXX)"
     echo "1. Staging clean 6-layer workstation to temp directory..."
-    DUMB_REMOTE="$temp_stage" run_backup "false" &>/dev/null
+    REMOTE="$temp_stage" TRASH="${temp_stage}/Old-Versions/${DATE}" run_backup "" "false" &>/dev/null
 
     echo "2. Compressing into clean single-file archive: ${archive_target}..."
     if command -v zstd &>/dev/null; then
@@ -801,7 +818,7 @@ run_unbundle() {
     fi
 
     echo "2. Launching selective restore..."
-    DUMB_REMOTE="$temp_stage" run_restore ""
+    REMOTE="$temp_stage" TRASH="${temp_stage}/Old-Versions/${DATE}" run_restore "" "false"
     rm -rf "$temp_stage"
     exit 0
 }
@@ -852,6 +869,8 @@ run_backup() {
     local is_dry_run="$2"
     IS_DRY_RUN="$is_dry_run"
     DRY_FLAG=""
+    SYNC_ERRORS=0
+    TRASH="${REMOTE}/Old-Versions/${DATE}"
     if [ "$IS_DRY_RUN" = "true" ]; then
         DRY_FLAG="--dry-run"
         echo -e "${YELLOW}>>> Running in DRY-RUN mode. No files will be modified or transferred. <<<${NC}\n"
@@ -890,6 +909,9 @@ run_backup() {
     echo -e "\n${BLUE}=====================================================${NC}"
     if [ "$IS_DRY_RUN" = "true" ]; then
         echo -e "${YELLOW}  🔍 Dry-run check completed! No errors encountered.${NC}"
+    elif [ "$SYNC_ERRORS" -gt 0 ]; then
+        echo -e "${YELLOW}  ⚠️ Backup finished with ${SYNC_ERRORS} issue(s). Check warnings above.${NC}"
+        notify_user "DUMB Backup Alert" "Completed with ${SYNC_ERRORS} issue(s)"
     else
         echo -e "${GREEN}  ✅ DUMB Backup Completed Successfully!             ${NC}"
         notify_user "DUMB Backup Completed" "Workstation state safely preserved via ${active_engine} to ${REMOTE}"
@@ -901,6 +923,7 @@ run_restore() {
     local requested_layers="$1"
     local is_dry_run="$2"
     IS_DRY_RUN="$is_dry_run"
+    TRASH="${REMOTE}/Old-Versions/${DATE}"
     local active_engine
     active_engine="$(detect_engine "$REMOTE")"
 
@@ -962,6 +985,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         -r|--remote)
             REMOTE="$2"
+            TRASH="${REMOTE}/Old-Versions/${DATE}"
             shift 2
             ;;
         -l|--layers)
@@ -981,6 +1005,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Ensure TRASH is strictly synchronized with finalized REMOTE
+TRASH="${REMOTE}/Old-Versions/${DATE}"
 
 case "$cmd" in
     init)
