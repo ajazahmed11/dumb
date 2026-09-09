@@ -24,7 +24,7 @@ if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 fi
 
-REMOTE="${DUMB_REMOTE:-gdrive:Ajaz-Backup-Hub}"
+REMOTE="${DUMB_REMOTE:-gdrive:DUMB-Vault}"
 DATE=$(date +%Y-%m-%d)
 TRASH="${REMOTE}/Old-Versions/${DATE}"
 BROWSER_PRESET="${DUMB_BROWSER_PRESET:-firefox}"
@@ -86,7 +86,7 @@ usage() {
     echo -e "Target Examples:"
     echo -e "  dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault   # USB Pendrive / Flash Drive"
     echo -e "  dumb backup -r $HOME/Nextcloud/DUMB-Vault             # Nextcloud / Dropbox"
-    echo -e "  dumb backup -r gdrive:Ajaz-Backup-Hub                 # Google Drive (rclone)"
+    echo -e "  dumb backup -r gdrive:DUMB-Vault                 # Google Drive (rclone)"
     echo -e "  dumb bundle /run/media/$USER/PENDRIVE/backup.tar.zst # Single-file archive"
     exit 0
 }
@@ -311,7 +311,7 @@ run_init() {
                 if [[ ! "$switch_local" =~ ^[Nn] ]]; then
                     REMOTE_CHOICE="$HOME/DUMB-Vault"
                 else
-                    REMOTE_CHOICE="gdrive:Ajaz-Backup-Hub"
+                    REMOTE_CHOICE="gdrive:DUMB-Vault"
                 fi
             else
                 local raw_remotes
@@ -339,7 +339,7 @@ run_init() {
                         read -rp "   Enter folder name on $chosen_remote [default: DUMB-Vault]: " cloud_f
                         REMOTE_CHOICE="${chosen_remote}${cloud_f:-DUMB-Vault}"
                     else
-                        REMOTE_CHOICE="${remote_list[0]}Ajaz-Backup-Hub"
+                        REMOTE_CHOICE="${remote_list[0]}DUMB-Vault"
                     fi
                 else
                     echo -e "\n   ${YELLOW}⚠️ No cloud accounts configured in rclone yet.${NC}"

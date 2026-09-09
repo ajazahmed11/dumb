@@ -111,7 +111,7 @@ dumb backup
 # Target Examples:
 dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault  # USB Pendrive (offline, native rsync)
 dumb backup -r $HOME/Nextcloud/DUMB-Vault            # Nextcloud / Dropbox sync folder
-dumb backup -r gdrive:Ajaz-Backup-Hub                # Google Drive (cloud rclone)
+dumb backup -r gdrive:DUMB-Vault                # Google Drive (cloud rclone)
 
 # 5. Show exact WHAT, WHERE, and HOW breakdown
 dumb explain
