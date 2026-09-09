@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-VERSION="0.7.1"
+VERSION="0.8.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -29,6 +29,45 @@ DATE=$(date +%Y-%m-%d)
 TRASH="${REMOTE}/Old-Versions/${DATE}"
 BROWSER_PRESET="${DUMB_BROWSER_PRESET:-firefox}"
 HARDWARE_PRESET="${DUMB_HARDWARE_PRESET:-asus-rog}"
+IS_DRY_RUN="false"
+DRY_FLAG=""
+
+# Default Master Layer Registry if undefined in config
+if [ -z "${AVAILABLE_LAYERS+x}" ] || [ ${#AVAILABLE_LAYERS[@]} -eq 0 ]; then
+    AVAILABLE_LAYERS=(
+        "1|Personal Files|Documents, Projects, Pictures, etc."
+        "2|Application Configurations|Clean ~/.config (excluding cache bloat)"
+        "3|Browser Session Vault|Persistent logins and session cookies"
+        "4|Home Dotfiles & Scripts|Tracked dotfiles and ~/.local/bin scripts"
+        "5|AI Agent Vault|All configured AI agent memories and brain contexts"
+        "6|Hardware Blueprint & Fonts|Fan curves, system services, and fonts"
+    )
+fi
+
+get_layer_name() {
+    local target_id="$1"
+    for entry in "${AVAILABLE_LAYERS[@]}"; do
+        local id="${entry%%|*}"
+        if [ "$id" = "$target_id" ]; then
+            local rest="${entry#*|}"
+            echo "${rest%%|*}"
+            return 0
+        fi
+    done
+    echo "Layer ${target_id}"
+}
+
+get_layer_desc() {
+    local target_id="$1"
+    for entry in "${AVAILABLE_LAYERS[@]}"; do
+        local id="${entry%%|*}"
+        if [ "$id" = "$target_id" ]; then
+            echo "${entry##*|}"
+            return 0
+        fi
+    done
+    echo ""
+}
 
 # Default fallback for Layer 4 dotfiles if undefined in config
 if [ -z "${DOTFILES+x}" ] || [ ${#DOTFILES[@]} -eq 0 ]; then
@@ -78,26 +117,27 @@ print_banner() {
 usage() {
     echo -e "Usage: dumb [COMMAND] [OPTIONS]\n"
     echo -e "Commands:"
-    echo -e "  backup               Run the full 6-layer workstation backup"
+    echo -e "  backup [OPTIONS]     Run workstation backup (all layers or selective -l)"
     echo -e "  restore [OPTIONS]    Restore selected layers onto this workstation"
     echo -e "  bundle [FILE.tar.zst] Pack entire clean workstation into a single pendrive archive"
     echo -e "  unbundle <ARCHIVE>   Restore from a single pendrive archive"
     echo -e "  explain              Show exact WHAT, WHERE, and HOW breakdown of this system"
     echo -e "  inspect              Scan and calculate disposable cache bloat eliminated"
     echo -e "  init                 Guided setup wizard with auto-detection for USB/Cloud/Folders"
-    echo -e "  check                Dry-run inspection of what would be backed up"
+    echo -e "  check [OPTIONS]      Dry-run inspection of what would be backed up"
     echo -e "  status               Show current backup configuration and target state"
     echo -e "  version              Print DUMB version"
     echo -e "  help                 Display this help message\n"
     echo -e "Options:"
     echo -e "  -r, --remote <dest>  Override target remote, local folder, or USB path"
-    echo -e "  -l, --layers <list>  Comma-separated layers to restore (1-6 or A)"
+    echo -e "  -l, --layers <list>  Comma-separated layers to backup/restore (1-6 or A)"
     echo -e "  -n, --dry-run        Simulate restore/backup without writing any files"
     echo -e "  -h, --help           Show help\n"
     echo -e "Target Examples:"
     echo -e "  dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault   # USB Pendrive / Flash Drive"
     echo -e "  dumb backup -r $HOME/Nextcloud/DUMB-Vault             # Nextcloud / Dropbox"
     echo -e "  dumb backup -r gdrive:DUMB-Vault                     # Google Drive (rclone)"
+    echo -e "  dumb backup -l 1,4                                   # Fast selective backup"
     echo -e "  dumb restore -n --layers 1,3,4                       # Safe restore dry-run"
     exit 0
 }
@@ -118,7 +158,7 @@ dumb_sync() {
         for exc in "${excludes[@]}"; do
             exc_args+=(--exclude "$exc")
         done
-        "$RCLONE_CMD" sync "$src" "$dst" --backup-dir "$trash" "${exc_args[@]}" --fast-list --links $dry_flag
+        "$RCLONE_CMD" sync "$src" "$dst" --backup-dir "$trash" "${exc_args[@]}" --fast-list --links $DRY_FLAG
     else
         if [ -z "$RSYNC_CMD" ]; then
             echo -e "${RED}Error: rsync is required for local/pendrive sync but not found.${NC}"
@@ -130,7 +170,7 @@ dumb_sync() {
             exc_args+=(--exclude="$exc")
         done
         local rsync_dry=""
-        [ "$dry_flag" = "--dry-run" ] && rsync_dry="-n"
+        [ "$IS_DRY_RUN" = "true" ] && rsync_dry="-n"
         "$RSYNC_CMD" -a --delete --backup --backup-dir="$trash" "${exc_args[@]}" "$src/" "$dst/" $rsync_dry
     fi
 }
@@ -142,7 +182,7 @@ dumb_copy() {
     engine="$(detect_engine "$dst")"
 
     if [ "$engine" = "rclone" ]; then
-        "$RCLONE_CMD" copy "$src" "$dst" $dry_flag
+        "$RCLONE_CMD" copy "$src" "$dst" $DRY_FLAG
     else
         if [ -z "$RSYNC_CMD" ]; then
             echo -e "${RED}Error: rsync is required for local copying.${NC}"
@@ -150,8 +190,270 @@ dumb_copy() {
         fi
         mkdir -p "$dst"
         local rsync_dry=""
-        [ "$dry_flag" = "--dry-run" ] && rsync_dry="-n"
+        [ "$IS_DRY_RUN" = "true" ] && rsync_dry="-n"
         "$RSYNC_CMD" -a "$src" "$dst/" $rsync_dry
+    fi
+}
+
+restore_copy() {
+    local src="$1"
+    local dst="$2"
+    if [ "$IS_DRY_RUN" = "true" ]; then
+        echo -e "   ${YELLOW}[DRY-RUN] Would restore:${NC} $src -> $dst"
+        return 0
+    fi
+    local active_engine
+    active_engine="$(detect_engine "$REMOTE")"
+    if [ "$active_engine" = "rclone" ]; then
+        "$RCLONE_CMD" copy "$src" "$dst" --fast-list 2>/dev/null || true
+    else
+        mkdir -p "$dst"
+        "$RSYNC_CMD" -a "$src/" "$dst/" 2>/dev/null || true
+    fi
+}
+
+restore_file() {
+    local src="$1"
+    local dst="$2"
+    if [ "$IS_DRY_RUN" = "true" ]; then
+        echo -e "   ${YELLOW}[DRY-RUN] Would restore file:${NC} $src -> $dst"
+        return 0
+    fi
+    mkdir -p "$(dirname "$dst")"
+    local active_engine
+    active_engine="$(detect_engine "$REMOTE")"
+    if [ "$active_engine" = "rclone" ]; then
+        "$RCLONE_CMD" copyto "$src" "$dst" 2>/dev/null || true
+    else
+        if [ -f "$src" ]; then
+            "$RSYNC_CMD" -a "$src" "$dst" 2>/dev/null || true
+        fi
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Modular Layer Handlers (Layers 1-6)
+# ------------------------------------------------------------------------------
+
+# Layer 1: Personal Files
+explain_layer_1() {
+    for p in "${PERSONAL_DIRS[@]}"; do
+        local p_exp="${p/#\~/$HOME}"
+        [ -d "$p_exp" ] && echo "     - $p_exp (Excludes: node_modules, .venv, build, __pycache__)"
+    done
+}
+backup_layer_1() {
+    for pdir in "${PERSONAL_DIRS[@]}"; do
+        local pdir_exp="${pdir/#\~/$HOME}"
+        if [ -d "$pdir_exp" ]; then
+            local bname
+            bname="$(basename "$pdir_exp")"
+            echo "   • Syncing: $pdir_exp -> ${REMOTE}/01-Personal-Files/${bname}"
+            dumb_sync "$pdir_exp" "${REMOTE}/01-Personal-Files/${bname}" \
+                "${TRASH}/01-Personal-Files/${bname}" "${EXCLUDE_PERSONAL[@]}"
+        fi
+    done
+}
+restore_layer_1() {
+    for pdir in "${PERSONAL_DIRS[@]}"; do
+        local pdir_exp="${pdir/#\~/$HOME}"
+        local bname
+        bname="$(basename "$pdir_exp")"
+        restore_copy "${REMOTE}/01-Personal-Files/${bname}" "$pdir_exp"
+    done
+}
+
+# Layer 2: Clean App Configurations (~/.config)
+explain_layer_2() {
+    echo "     - $HOME/.config (Excludes: GPUCache, blob_storage, sockets, locks)"
+}
+backup_layer_2() {
+    if [ -d "$HOME/.config" ]; then
+        dumb_sync "$HOME/.config" "${REMOTE}/02-dot-config" \
+            "${TRASH}/02-dot-config" "${EXCLUDE_CONFIG[@]}"
+    fi
+}
+restore_layer_2() {
+    restore_copy "${REMOTE}/02-dot-config" "$HOME/.config"
+}
+
+# Layer 3: Browser Session Vault
+explain_layer_3() {
+    echo "     - Preset '${BROWSER_PRESET}' (Preserves cookies & logins, strips disposable cache2/)"
+}
+backup_layer_3() {
+    local browser_preset_file="${PROJECT_ROOT}/presets/browsers/${BROWSER_PRESET}.conf"
+    if [ "$BROWSER_PRESET" != "none" ] && [ -f "$browser_preset_file" ]; then
+        # shellcheck source=/dev/null
+        source "$browser_preset_file"
+        local found_browser=""
+        for b_path in "${BROWSER_PATHS[@]}"; do
+            b_path="${b_path/#\~/$HOME}"
+            if [ -d "$b_path" ]; then
+                found_browser="$b_path"
+                break
+            fi
+        done
+        if [ -n "$found_browser" ]; then
+            echo "   • Syncing Browser [${BROWSER_NAME}]: $found_browser"
+            dumb_sync "$found_browser" "${REMOTE}/03-Browser-Vault" \
+                "${TRASH}/03-Browser-Vault" "${BROWSER_EXCLUDES[@]}"
+        else
+            echo "   No active profile directory found for ${BROWSER_NAME}. Skipping."
+        fi
+    else
+        echo "   Browser preset set to 'none' or preset file missing. Skipping."
+    fi
+}
+restore_layer_3() {
+    local browser_preset_file="${PROJECT_ROOT}/presets/browsers/${BROWSER_PRESET}.conf"
+    if [ -f "$browser_preset_file" ]; then
+        # shellcheck source=/dev/null
+        source "$browser_preset_file"
+        local dest_path="${BROWSER_PATHS[0]}"
+        dest_path="${dest_path/#\~/$HOME}"
+        mkdir -p "$dest_path"
+        restore_copy "${REMOTE}/03-Browser-Vault" "$dest_path"
+        echo "   Logins and cookies target: $dest_path"
+    fi
+}
+
+# Layer 4: Home Dotfiles & Custom Scripts
+explain_layer_4() {
+    echo "     - Tracked dotfiles:"
+    for df in "${DOTFILES[@]}"; do
+        local df_exp="${df/#\~/$HOME}"
+        [ -f "$df_exp" ] && echo "       • $df_exp"
+    done
+    [ -d "$HOME/.local/bin" ] && echo "     - Custom user scripts: $HOME/.local/bin"
+}
+backup_layer_4() {
+    for df in "${DOTFILES[@]}"; do
+        local df_exp="${df/#\~/$HOME}"
+        if [ -f "$df_exp" ]; then
+            echo "   • Syncing dotfile: $df_exp"
+            dumb_copy "$df_exp" "${REMOTE}/04-Home-Dotfiles/"
+        fi
+    done
+    if [ -d "$HOME/.local/bin" ]; then
+        dumb_sync "$HOME/.local/bin" "${REMOTE}/04-Home-Dotfiles/local-bin" \
+            "${TRASH}/04-Home-Dotfiles/local-bin" "agy" "rclone"
+    fi
+}
+restore_layer_4() {
+    for df in "${DOTFILES[@]}"; do
+        local df_exp="${df/#\~/$HOME}"
+        local bname
+        bname="$(basename "$df_exp")"
+        restore_file "${REMOTE}/04-Home-Dotfiles/${bname}" "$df_exp"
+    done
+    mkdir -p "$HOME/.local/bin"
+    restore_copy "${REMOTE}/04-Home-Dotfiles/local-bin" "$HOME/.local/bin"
+}
+
+# Layer 5: AI Agent Vault
+explain_layer_5() {
+    for a in "${AI_AGENT_DIRS[@]}"; do
+        local aname="${a%%:*}"
+        local apath="${a#*:}"
+        apath="${apath/#\~/$HOME}"
+        [ -d "$apath" ] && echo "     - $aname ($apath)"
+    done
+}
+backup_layer_5() {
+    for agent_entry in "${AI_AGENT_DIRS[@]}"; do
+        local agent_name="${agent_entry%%:*}"
+        local agent_path="${agent_entry#*:}"
+        agent_path="${agent_path/#\~/$HOME}"
+        if [ -d "$agent_path" ]; then
+            echo "   • Syncing AI Agent [${agent_name}]: $agent_path"
+            dumb_sync "$agent_path" "${REMOTE}/05-AI-Agent-Vault/${agent_name}" \
+                "${TRASH}/05-AI-Agent-Vault/${agent_name}" "${EXCLUDE_AI_AGENTS[@]}"
+        fi
+    done
+}
+restore_layer_5() {
+    for agent_entry in "${AI_AGENT_DIRS[@]}"; do
+        local agent_name="${agent_entry%%:*}"
+        local agent_path="${agent_entry#*:}"
+        agent_path="${agent_path/#\~/$HOME}"
+        mkdir -p "$agent_path"
+        restore_copy "${REMOTE}/05-AI-Agent-Vault/${agent_name}" "$agent_path"
+    done
+}
+
+# Layer 6: Hardware Blueprint & Fonts
+explain_layer_6() {
+    echo "     - Preset '${HARDWARE_PRESET}' (fan curves, CPU boost disable service, fonts)"
+}
+backup_layer_6() {
+    local hw_preset_file="${PROJECT_ROOT}/presets/hardware/${HARDWARE_PRESET}.conf"
+    if [ "$HARDWARE_PRESET" != "none" ] && [ -f "$hw_preset_file" ]; then
+        # shellcheck source=/dev/null
+        source "$hw_preset_file"
+        for hw_path in "${HARDWARE_PATHS[@]}"; do
+            hw_path="${hw_path/#\~/$HOME}"
+            if [ -e "$hw_path" ]; then
+                local bname
+                bname="$(basename "$hw_path")"
+                if [ -d "$hw_path" ]; then
+                    dumb_sync "$hw_path" "${REMOTE}/06-Hardware-Blueprint/${bname}" \
+                        "${TRASH}/06-Hardware-Blueprint/${bname}"
+                else
+                    dumb_copy "$hw_path" "${REMOTE}/06-Hardware-Blueprint/"
+                fi
+            fi
+        done
+    fi
+    if [ -d "$HOME/.local/share/fonts/JetBrainsMono" ]; then
+        dumb_sync "$HOME/.local/share/fonts/JetBrainsMono" "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" \
+            "${TRASH}/06-Hardware-Blueprint/fonts/JetBrainsMono"
+    fi
+}
+restore_layer_6() {
+    local blueprint_dir="${HARDWARE_BLUEPRINT_DIR:-$HOME/Hardware-Blueprint}"
+    mkdir -p "$blueprint_dir" "$HOME/.local/share/fonts/JetBrainsMono"
+    restore_copy "${REMOTE}/06-Hardware-Blueprint" "$blueprint_dir"
+    restore_copy "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" "$HOME/.local/share/fonts/JetBrainsMono"
+    if command -v fc-cache &>/dev/null && [ "$IS_DRY_RUN" != "true" ]; then
+        fc-cache -fv "$HOME/.local/share/fonts" &>/dev/null || true
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Generic Layer Dispatchers
+# ------------------------------------------------------------------------------
+run_layer_backup() {
+    local num="$1"
+    local name
+    name="$(get_layer_name "$num")"
+    echo -e "\n${GREEN}[Layer ${num}/${#AVAILABLE_LAYERS[@]}] ${name}...${NC}"
+    if declare -f "backup_layer_${num}" >/dev/null; then
+        "backup_layer_${num}"
+    else
+        echo "   Layer handler backup_layer_${num} not found. Skipping."
+    fi
+}
+
+run_layer_restore() {
+    local num="$1"
+    local name
+    name="$(get_layer_name "$num")"
+    echo -e "\n${GREEN}[Restoring Layer ${num}] ${name}...${NC}"
+    if declare -f "restore_layer_${num}" >/dev/null; then
+        "restore_layer_${num}"
+    else
+        echo "   Layer handler restore_layer_${num} not found. Skipping."
+    fi
+}
+
+run_layer_explain() {
+    local num="$1"
+    local name
+    name="$(get_layer_name "$num")"
+    echo "   • Layer ${num} (${name}):"
+    if declare -f "explain_layer_${num}" >/dev/null; then
+        "explain_layer_${num}"
     fi
 }
 
@@ -163,31 +465,10 @@ run_explain() {
     echo -e "\n${BOLD}📋 EXACT BREAKDOWN (WHAT, WHERE & HOW):${NC}\n"
 
     echo -e "${BOLD}1. THE 'WHAT' (What DUMB grabs from your machine):${NC}"
-    echo "   • Layer 1 (Personal):"
-    for p in "${PERSONAL_DIRS[@]}"; do
-        p="${p/#\~/$HOME}"
-        [ -d "$p" ] && echo "     - $p (Excludes: node_modules, .venv, build, __pycache__)"
+    for entry in "${AVAILABLE_LAYERS[@]}"; do
+        local id="${entry%%|*}"
+        run_layer_explain "$id"
     done
-    echo "   • Layer 2 (App Configs):"
-    echo "     - $HOME/.config (Excludes: GPUCache, blob_storage, sockets, locks)"
-    echo "   • Layer 3 (Browser Session Vault):"
-    echo "     - Preset '${BROWSER_PRESET}' (Preserves cookies & logins, strips disposable cache2/)"
-    echo "   • Layer 4 (Home Dotfiles & Local Scripts):"
-    echo "     - Tracked dotfiles:"
-    for df in "${DOTFILES[@]}"; do
-        local df_exp="${df/#\~/$HOME}"
-        [ -f "$df_exp" ] && echo "       • $df_exp"
-    done
-    [ -d "$HOME/.local/bin" ] && echo "     - Custom user scripts: $HOME/.local/bin"
-    echo "   • Layer 5 (AI Agent Vault):"
-    for a in "${AI_AGENT_DIRS[@]}"; do
-        local aname="${a%%:*}"
-        local apath="${a#*:}"
-        apath="${apath/#\~/$HOME}"
-        [ -d "$apath" ] && echo "     - $aname ($apath)"
-    done
-    echo "   • Layer 6 (Hardware Blueprint):"
-    echo "     - Preset '${HARDWARE_PRESET}' (fan curves, CPU boost disable service, fonts)"
 
     echo -e "\n${BOLD}2. THE 'WHERE' (Destination Target):${NC}"
     echo "   • Target: ${REMOTE}"
@@ -567,10 +848,12 @@ run_inspect() {
 }
 
 run_backup() {
-    local is_dry_run="$1"
-    local dry_flag=""
-    if [ "$is_dry_run" = "true" ]; then
-        dry_flag="--dry-run"
+    local requested_layers="$1"
+    local is_dry_run="$2"
+    IS_DRY_RUN="$is_dry_run"
+    DRY_FLAG=""
+    if [ "$IS_DRY_RUN" = "true" ]; then
+        DRY_FLAG="--dry-run"
         echo -e "${YELLOW}>>> Running in DRY-RUN mode. No files will be modified or transferred. <<<${NC}\n"
     fi
 
@@ -588,107 +871,24 @@ run_backup() {
         fi
     fi
 
-    # 1. Personal Files (Dynamic loop over PERSONAL_DIRS)
-    echo -e "${GREEN}[Layer 1/6] Personal Files...${NC}"
-    for pdir in "${PERSONAL_DIRS[@]}"; do
-        pdir="${pdir/#\~/$HOME}"
-        if [ -d "$pdir" ]; then
-            local bname
-            bname="$(basename "$pdir")"
-            echo "   • Syncing: $pdir -> ${REMOTE}/01-Personal-Files/${bname}"
-            dumb_sync "$pdir" "${REMOTE}/01-Personal-Files/${bname}" \
-                "${TRASH}/01-Personal-Files/${bname}" "${EXCLUDE_PERSONAL[@]}"
-        fi
-    done
-
-    # 2. Clean dot-config
-    echo -e "\n${GREEN}[Layer 2/6] Clean App Configurations (~/.config)...${NC}"
-    if [ -d "$HOME/.config" ]; then
-        dumb_sync "$HOME/.config" "${REMOTE}/02-dot-config" \
-            "${TRASH}/02-dot-config" "${EXCLUDE_CONFIG[@]}"
-    fi
-
-    # 3. Browser Session Vault
-    echo -e "\n${GREEN}[Layer 3/6] Browser Session Vault (Preset: ${BROWSER_PRESET})...${NC}"
-    local browser_preset_file="${PROJECT_ROOT}/presets/browsers/${BROWSER_PRESET}.conf"
-    if [ "$BROWSER_PRESET" != "none" ] && [ -f "$browser_preset_file" ]; then
-        # shellcheck source=/dev/null
-        source "$browser_preset_file"
-        local found_browser=""
-        for b_path in "${BROWSER_PATHS[@]}"; do
-            b_path="${b_path/#\~/$HOME}"
-            if [ -d "$b_path" ]; then
-                found_browser="$b_path"
-                break
-            fi
+    local layers_to_run=()
+    if [ -z "$requested_layers" ] || [[ "$requested_layers" =~ [Aa] ]]; then
+        for entry in "${AVAILABLE_LAYERS[@]}"; do
+            layers_to_run+=("${entry%%|*}")
         done
-        if [ -n "$found_browser" ]; then
-            echo "   • Syncing Browser [${BROWSER_NAME}]: $found_browser"
-            dumb_sync "$found_browser" "${REMOTE}/03-Browser-Vault" \
-                "${TRASH}/03-Browser-Vault" "${BROWSER_EXCLUDES[@]}"
-        else
-            echo "   No active profile directory found for ${BROWSER_NAME}. Skipping."
-        fi
     else
-        echo "   Browser preset set to 'none' or preset file missing. Skipping."
-    fi
-
-    # 4. Home Dotfiles & Local Binaries
-    echo -e "\n${GREEN}[Layer 4/6] Home Dotfiles & Custom Scripts...${NC}"
-    for df in "${DOTFILES[@]}"; do
-        local df_exp="${df/#\~/$HOME}"
-        if [ -f "$df_exp" ]; then
-            echo "   • Syncing dotfile: $df_exp"
-            dumb_copy "$df_exp" "${REMOTE}/04-Home-Dotfiles/"
-        fi
-    done
-
-    if [ -d "$HOME/.local/bin" ]; then
-        dumb_sync "$HOME/.local/bin" "${REMOTE}/04-Home-Dotfiles/local-bin" \
-            "${TRASH}/04-Home-Dotfiles/local-bin" "agy" "rclone"
-    fi
-
-    # 5. AI Agent Vault (Dynamic loop over AI_AGENT_DIRS)
-    echo -e "\n${GREEN}[Layer 5/6] AI Agent Vault...${NC}"
-    for agent_entry in "${AI_AGENT_DIRS[@]}"; do
-        local agent_name="${agent_entry%%:*}"
-        local agent_path="${agent_entry#*:}"
-        agent_path="${agent_path/#\~/$HOME}"
-        if [ -d "$agent_path" ]; then
-            echo "   • Syncing AI Agent [${agent_name}]: $agent_path"
-            dumb_sync "$agent_path" "${REMOTE}/05-AI-Agent-Vault/${agent_name}" \
-                "${TRASH}/05-AI-Agent-Vault/${agent_name}" "${EXCLUDE_AI_AGENTS[@]}"
-        fi
-    done
-
-    # 6. Hardware Blueprint & Fonts
-    echo -e "\n${GREEN}[Layer 6/6] Hardware Blueprint (Preset: ${HARDWARE_PRESET})...${NC}"
-    local hw_preset_file="${PROJECT_ROOT}/presets/hardware/${HARDWARE_PRESET}.conf"
-    if [ "$HARDWARE_PRESET" != "none" ] && [ -f "$hw_preset_file" ]; then
-        # shellcheck source=/dev/null
-        source "$hw_preset_file"
-        for hw_path in "${HARDWARE_PATHS[@]}"; do
-            hw_path="${hw_path/#\~/$HOME}"
-            if [ -e "$hw_path" ]; then
-                local bname
-                bname="$(basename "$hw_path")"
-                if [ -d "$hw_path" ]; then
-                    dumb_sync "$hw_path" "${REMOTE}/06-Hardware-Blueprint/${bname}" \
-                        "${TRASH}/06-Hardware-Blueprint/${bname}"
-                else
-                    dumb_copy "$hw_path" "${REMOTE}/06-Hardware-Blueprint/"
-                fi
-            fi
+        IFS=',' read -ra SPLIT <<< "$requested_layers"
+        for l in "${SPLIT[@]}"; do
+            layers_to_run+=("$(echo "$l" | xargs)")
         done
     fi
 
-    if [ -d "$HOME/.local/share/fonts/JetBrainsMono" ]; then
-        dumb_sync "$HOME/.local/share/fonts/JetBrainsMono" "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" \
-            "${TRASH}/06-Hardware-Blueprint/fonts/JetBrainsMono"
-    fi
+    for l in "${layers_to_run[@]}"; do
+        run_layer_backup "$l"
+    done
 
     echo -e "\n${BLUE}=====================================================${NC}"
-    if [ "$is_dry_run" = "true" ]; then
+    if [ "$IS_DRY_RUN" = "true" ]; then
         echo -e "${YELLOW}  🔍 Dry-run check completed! No errors encountered.${NC}"
     else
         echo -e "${GREEN}  ✅ DUMB Backup Completed Successfully!             ${NC}"
@@ -700,11 +900,12 @@ run_backup() {
 run_restore() {
     local requested_layers="$1"
     local is_dry_run="$2"
+    IS_DRY_RUN="$is_dry_run"
     local active_engine
     active_engine="$(detect_engine "$REMOTE")"
 
     echo -e "${BLUE}=====================================================${NC}"
-    if [ "$is_dry_run" = "true" ]; then
+    if [ "$IS_DRY_RUN" = "true" ]; then
         echo -e "${YELLOW}${BOLD}  🔄 DUMB Restore Preview (DRY-RUN MODE)              ${NC}"
     else
         echo -e "${BOLD}  🔄 DUMB Selective Workstation Restore               ${NC}"
@@ -713,123 +914,35 @@ run_restore() {
 
     if [ -z "$requested_layers" ]; then
         echo "Which layers would you like to restore onto this machine?"
-        echo "  [1] Personal Files (Documents, Projects, Pictures, etc.)"
-        echo "  [2] Application Configurations (~/.config)"
-        echo "  [3] Browser Session Vault (Persistent Logins / Cookies)"
-        echo "  [4] Home Dotfiles & Custom Scripts (~/.bashrc, ~/.zshrc, ~/.local/bin)"
-        echo "  [5] AI Agent Vault (All configured AI agent memories)"
-        echo "  [6] Hardware Blueprint & Fonts (Fan curves, services, fonts)"
+        for entry in "${AVAILABLE_LAYERS[@]}"; do
+            local lid="${entry%%|*}"
+            local rest="${entry#*|}"
+            local lname="${rest%%|*}"
+            local ldesc="${rest##*|}"
+            echo "  [${lid}] ${lname} (${ldesc})"
+        done
         echo "  [A] All Layers"
         read -rp "Select layers to restore [e.g. 1,3,4 or A]: " requested_layers
     fi
 
-    restore_copy() {
-        local src="$1"
-        local dst="$2"
-        if [ "$is_dry_run" = "true" ]; then
-            echo -e "   ${YELLOW}[DRY-RUN] Would restore:${NC} $src -> $dst"
-            return 0
-        fi
-        if [ "$active_engine" = "rclone" ]; then
-            "$RCLONE_CMD" copy "$src" "$dst" --fast-list 2>/dev/null || true
-        else
-            mkdir -p "$dst"
-            "$RSYNC_CMD" -a "$src/" "$dst/" 2>/dev/null || true
-        fi
-    }
-
-    restore_file() {
-        local src="$1"
-        local dst="$2"
-        if [ "$is_dry_run" = "true" ]; then
-            echo -e "   ${YELLOW}[DRY-RUN] Would restore file:${NC} $src -> $dst"
-            return 0
-        fi
-        mkdir -p "$(dirname "$dst")"
-        if [ "$active_engine" = "rclone" ]; then
-            "$RCLONE_CMD" copyto "$src" "$dst" 2>/dev/null || true
-        else
-            if [ -f "$src" ]; then
-                "$RSYNC_CMD" -a "$src" "$dst" 2>/dev/null || true
-            fi
-        fi
-    }
-
-    restore_layer() {
-        local layer_num="$1"
-        case "$layer_num" in
-            1)
-                echo -e "\n${GREEN}[Restoring Layer 1] Personal Files...${NC}"
-                for pdir in "${PERSONAL_DIRS[@]}"; do
-                    pdir="${pdir/#\~/$HOME}"
-                    local bname
-                    bname="$(basename "$pdir")"
-                    restore_copy "${REMOTE}/01-Personal-Files/${bname}" "$pdir"
-                done
-                ;;
-            2)
-                echo -e "\n${GREEN}[Restoring Layer 2] Application Configurations...${NC}"
-                restore_copy "${REMOTE}/02-dot-config" "$HOME/.config"
-                ;;
-            3)
-                echo -e "\n${GREEN}[Restoring Layer 3] Browser Session Vault...${NC}"
-                local browser_preset_file="${PROJECT_ROOT}/presets/browsers/${BROWSER_PRESET}.conf"
-                if [ -f "$browser_preset_file" ]; then
-                    # shellcheck source=/dev/null
-                    source "$browser_preset_file"
-                    local dest_path="${BROWSER_PATHS[0]}"
-                    dest_path="${dest_path/#\~/$HOME}"
-                    mkdir -p "$dest_path"
-                    restore_copy "${REMOTE}/03-Browser-Vault" "$dest_path"
-                    echo "   Logins and cookies target: $dest_path"
-                fi
-                ;;
-            4)
-                echo -e "\n${GREEN}[Restoring Layer 4] Dotfiles & Local Scripts...${NC}"
-                for df in "${DOTFILES[@]}"; do
-                    local df_exp="${df/#\~/$HOME}"
-                    local bname
-                    bname="$(basename "$df_exp")"
-                    restore_file "${REMOTE}/04-Home-Dotfiles/${bname}" "$df_exp"
-                done
-                mkdir -p "$HOME/.local/bin"
-                restore_copy "${REMOTE}/04-Home-Dotfiles/local-bin" "$HOME/.local/bin"
-                ;;
-            5)
-                echo -e "\n${GREEN}[Restoring Layer 5] AI Agent Vault...${NC}"
-                for agent_entry in "${AI_AGENT_DIRS[@]}"; do
-                    local agent_name="${agent_entry%%:*}"
-                    local agent_path="${agent_entry#*:}"
-                    agent_path="${agent_path/#\~/$HOME}"
-                    mkdir -p "$agent_path"
-                    restore_copy "${REMOTE}/05-AI-Agent-Vault/${agent_name}" "$agent_path"
-                done
-                ;;
-            6)
-                echo -e "\n${GREEN}[Restoring Layer 6] Hardware Blueprint & Fonts...${NC}"
-                local blueprint_dir="${HARDWARE_BLUEPRINT_DIR:-$HOME/Hardware-Blueprint}"
-                mkdir -p "$blueprint_dir" "$HOME/.local/share/fonts/JetBrainsMono"
-                restore_copy "${REMOTE}/06-Hardware-Blueprint" "$blueprint_dir"
-                restore_copy "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" "$HOME/.local/share/fonts/JetBrainsMono"
-                if command -v fc-cache &>/dev/null && [ "$is_dry_run" != "true" ]; then
-                    fc-cache -fv "$HOME/.local/share/fonts" &>/dev/null || true
-                fi
-                ;;
-        esac
-    }
-
+    local layers_to_restore=()
     if [[ "$requested_layers" =~ [Aa] ]]; then
-        for l in 1 2 3 4 5 6; do restore_layer "$l"; done
+        for entry in "${AVAILABLE_LAYERS[@]}"; do
+            layers_to_restore+=("${entry%%|*}")
+        done
     else
-        IFS=',' read -ra LAYERS <<< "$requested_layers"
-        for l in "${LAYERS[@]}"; do
-            trimmed="$(echo "$l" | xargs)"
-            restore_layer "$trimmed"
+        IFS=',' read -ra SPLIT <<< "$requested_layers"
+        for l in "${SPLIT[@]}"; do
+            layers_to_restore+=("$(echo "$l" | xargs)")
         done
     fi
 
+    for l in "${layers_to_restore[@]}"; do
+        run_layer_restore "$l"
+    done
+
     echo -e "\n${BLUE}=====================================================${NC}"
-    if [ "$is_dry_run" = "true" ]; then
+    if [ "$IS_DRY_RUN" = "true" ]; then
         echo -e "${YELLOW}  🔍 Restore dry-run preview finished! No files were touched.${NC}"
     else
         echo -e "${GREEN}  ✅ Workstation Restore Completed Successfully!      ${NC}"
@@ -842,6 +955,7 @@ run_restore() {
 cmd="${1:-backup}"
 shift || true
 
+TARGET_LAYERS=""
 DRY_RUN="false"
 
 while [[ $# -gt 0 ]]; do
@@ -851,7 +965,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -l|--layers)
-            RESTORE_LAYERS="$2"
+            TARGET_LAYERS="$2"
             shift 2
             ;;
         -n|--dry-run)
@@ -874,7 +988,7 @@ case "$cmd" in
         ;;
     backup)
         print_banner
-        run_backup "$DRY_RUN"
+        run_backup "$TARGET_LAYERS" "$DRY_RUN"
         ;;
     bundle)
         run_bundle "$EXTRA_ARG"
@@ -887,14 +1001,14 @@ case "$cmd" in
         ;;
     restore)
         print_banner
-        run_restore "$RESTORE_LAYERS" "$DRY_RUN"
+        run_restore "$TARGET_LAYERS" "$DRY_RUN"
         ;;
     inspect)
         run_inspect
         ;;
     check)
         print_banner
-        run_backup "true"
+        run_backup "$TARGET_LAYERS" "true"
         ;;
     status)
         run_status

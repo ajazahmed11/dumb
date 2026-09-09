@@ -108,10 +108,12 @@ dumb check
 # 4. Run the clean 6-layer backup (Cloud via rclone, or USB/Nextcloud via rsync)
 dumb backup
 
-# Target Examples:
+# Target & Selective Examples:
 dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault  # USB Pendrive (offline, native rsync)
 dumb backup -r $HOME/Nextcloud/DUMB-Vault            # Nextcloud / Dropbox sync folder
-dumb backup -r gdrive:DUMB-Vault                # Google Drive (cloud rclone)
+dumb backup -r gdrive:DUMB-Vault                     # Google Drive (cloud rclone)
+dumb backup -l 1,4                                   # Fast selective backup (Personal + Dotfiles)
+dumb backup -n                                       # Safe backup dry-run preview
 
 # 5. Show exact WHAT, WHERE, and HOW breakdown
 dumb explain
