@@ -6,7 +6,7 @@
 
 set -eo pipefail
 
-VERSION="0.4.0"
+VERSION="0.5.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -30,8 +30,9 @@ TRASH="${REMOTE}/Old-Versions/${DATE}"
 BROWSER_PRESET="${DUMB_BROWSER_PRESET:-firefox}"
 HARDWARE_PRESET="${DUMB_HARDWARE_PRESET:-asus-rog}"
 
-# Detect rclone
+# Detect available engines
 RCLONE_CMD="$(command -v rclone 2>/dev/null || echo "$HOME/.local/bin/rclone")"
+RSYNC_CMD="$(command -v rsync 2>/dev/null || echo "")"
 
 notify_user() {
     local title="$1"
@@ -41,11 +42,23 @@ notify_user() {
     fi
 }
 
+detect_engine() {
+    local target="$1"
+    if [[ "$target" =~ ^[a-zA-Z0-9_-]+: ]]; then
+        echo "rclone"
+    else
+        echo "rsync"
+    fi
+}
+
 print_banner() {
+    local active_engine
+    active_engine="$(detect_engine "$REMOTE")"
     echo -e "${BLUE}=====================================================${NC}"
     echo -e "${BLUE}  🥱 DUMB — DUMB's Universal Migration & Backup     ${NC}"
     echo -e "${BLUE}  Version:   v${VERSION}                                  ${NC}"
     echo -e "${BLUE}  Target:    ${REMOTE}                             ${NC}"
+    echo -e "${BLUE}  Engine:    ${active_engine} (Auto-detected)             ${NC}"
     echo -e "${BLUE}  Safety:    ${TRASH}                             ${NC}"
     echo -e "${BLUE}  Browser:   ${BROWSER_PRESET}                    ${NC}"
     echo -e "${BLUE}  Hardware:  ${HARDWARE_PRESET}                   ${NC}"
@@ -58,25 +71,79 @@ usage() {
     echo -e "  backup               Run the full 6-layer workstation backup"
     echo -e "  restore [LAYERS]     Restore selected layers to this workstation"
     echo -e "  inspect              Scan and calculate disposable cache bloat eliminated"
-    echo -e "  init                 Run interactive setup wizard to configure target and presets"
+    echo -e "  init                 Run interactive setup wizard (Pendrive, Sync Folder, Cloud)"
     echo -e "  check                Dry-run inspection of what would be backed up"
-    echo -e "  status               Show current backup configuration and remote state"
+    echo -e "  status               Show current backup configuration and target state"
     echo -e "  version              Print DUMB version"
     echo -e "  help                 Display this help message\n"
     echo -e "Options:"
     echo -e "  -r, --remote <dest>  Override target remote or local path"
     echo -e "  -h, --help           Show help\n"
-    echo -e "Restore Examples:"
-    echo -e "  dumb restore                     # Interactive checklist"
-    echo -e "  dumb restore --layers 1,3,4      # Restore Personal, Browser Logins, Dotfiles"
+    echo -e "Target Examples:"
+    echo -e "  dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault   # USB Flash Drive (rsync)"
+    echo -e "  dumb backup -r $HOME/Nextcloud/DUMB-Vault             # Nextcloud / Dropbox (rsync)"
+    echo -e "  dumb backup -r gdrive:Ajaz-Backup-Hub                 # Google Drive (rclone)"
     exit 0
+}
+
+# Unified Transport Helpers
+dumb_sync() {
+    local src="$1"
+    local dst="$2"
+    local trash="$3"
+    shift 3
+    local excludes=("$@")
+
+    local engine
+    engine="$(detect_engine "$dst")"
+
+    if [ "$engine" = "rclone" ]; then
+        local exc_args=()
+        for exc in "${excludes[@]}"; do
+            exc_args+=(--exclude "$exc")
+        done
+        "$RCLONE_CMD" sync "$src" "$dst" --backup-dir "$trash" "${exc_args[@]}" --fast-list --links $dry_flag
+    else
+        if [ -z "$RSYNC_CMD" ]; then
+            echo -e "${RED}Error: rsync is required for local/pendrive sync but not found.${NC}"
+            exit 1
+        fi
+        mkdir -p "$dst" "$trash"
+        local exc_args=()
+        for exc in "${excludes[@]}"; do
+            exc_args+=(--exclude="$exc")
+        done
+        local rsync_dry=""
+        [ "$dry_flag" = "--dry-run" ] && rsync_dry="-n"
+        "$RSYNC_CMD" -a --delete --backup --backup-dir="$trash" "${exc_args[@]}" "$src/" "$dst/" $rsync_dry
+    fi
+}
+
+dumb_copy() {
+    local src="$1"
+    local dst="$2"
+    local engine
+    engine="$(detect_engine "$dst")"
+
+    if [ "$engine" = "rclone" ]; then
+        "$RCLONE_CMD" copy "$src" "$dst" $dry_flag
+    else
+        if [ -z "$RSYNC_CMD" ]; then
+            echo -e "${RED}Error: rsync is required for local copying.${NC}"
+            exit 1
+        fi
+        mkdir -p "$dst"
+        local rsync_dry=""
+        [ "$dry_flag" = "--dry-run" ] && rsync_dry="-n"
+        "$RSYNC_CMD" -a "$src" "$dst/" $rsync_dry
+    fi
 }
 
 run_init() {
     echo -e "${BLUE}=====================================================${NC}"
     echo -e "${BOLD}  🥱 DUMB Workstation Setup Wizard                    ${NC}"
     echo -e "${BLUE}=====================================================${NC}\n"
-    echo -e "Let's configure DUMB for your machine in 4 quick steps.\n"
+    echo -e "Let's configure DUMB for your workstation in 4 quick steps.\n"
 
     # Step 1: Personal Folders
     echo -e "${BOLD}1. Custom Personal Folders to sync (comma-separated):${NC}"
@@ -111,14 +178,38 @@ run_init() {
         *) HARDWARE_CHOICE="asus-rog" ;;
     esac
 
-    # Step 4: Storage Remote
-    echo -e "\n${BOLD}4. Where would you like to save your backups?${NC}"
-    echo "   Examples:"
-    echo "     - Cloud:      gdrive:Ajaz-Backup-Hub or onedrive:Workstation"
-    echo "     - Local USB:  /run/media/$USER/MyDrive/DUMB-Vault"
-    echo "     - Local NAS:  /mnt/nas/backups"
-    read -rp "   Target Remote [default: gdrive:Ajaz-Backup-Hub]: " input_remote
-    REMOTE_CHOICE="${input_remote:-gdrive:Ajaz-Backup-Hub}"
+    # Step 4: Storage Target (Any Destination)
+    echo -e "\n${BOLD}4. Where do you want to save your workstation state?${NC}"
+    echo "   [1] USB Pendrive / Flash Drive / External SSD (e.g. /run/media/$USER/Drive/Vault)"
+    echo "   [2] Local Sync Folder (e.g. ~/Nextcloud/DUMB-Vault or ~/Dropbox/DUMB-Vault)"
+    echo "   [3] Cloud Account via rclone (Google Drive, OneDrive, Proton, S3)"
+    read -rp "   Choice [1-3, default: 3]: " input_dest_type
+
+    case "$input_dest_type" in
+        1)
+            read -rp "   Enter USB / Flash Drive path [e.g. /run/media/$USER/PENDRIVE/DUMB-Vault]: " input_usb
+            REMOTE_CHOICE="${input_usb:-/run/media/$USER/PENDRIVE/DUMB-Vault}"
+            ;;
+        2)
+            read -rp "   Enter Sync Folder path [e.g. $HOME/Nextcloud/DUMB-Vault]: " input_sync
+            REMOTE_CHOICE="${input_sync:-$HOME/Nextcloud/DUMB-Vault}"
+            ;;
+        *)
+            # Cloud: check if rclone has remotes
+            if command -v "$RCLONE_CMD" &>/dev/null; then
+                local remotes
+                remotes="$("$RCLONE_CMD" listremotes 2>/dev/null || true)"
+                if [ -n "$remotes" ]; then
+                    echo -e "   Found cloud accounts configured in rclone:"
+                    echo "$remotes" | sed 's/^/     • /'
+                else
+                    echo -e "   ${YELLOW}Note: No rclone cloud remotes found yet. You can run 'rclone config' anytime.${NC}"
+                fi
+            fi
+            read -rp "   Enter Cloud target [default: gdrive:Ajaz-Backup-Hub]: " input_cloud
+            REMOTE_CHOICE="${input_cloud:-gdrive:Ajaz-Backup-Hub}"
+            ;;
+    esac
 
     local pdirs_str="(\n    \"\$HOME/Documents\"\n    \"\$HOME/Pictures\"\n    \"\$HOME/Projects\""
     if [ -n "$extra_paths" ]; then
@@ -214,17 +305,12 @@ run_inspect() {
         fi
     }
 
-    # Browser disk cache
     measure_dir "$HOME/.cache/mozilla" "Firefox Web Disk Cache (cache2)"
     measure_dir "$HOME/.cache/BraveSoftware" "Brave Browser Cache"
     measure_dir "$HOME/.cache/google-chrome" "Chrome Browser Cache"
-
-    # Electron & App caches
     measure_dir "$HOME/.cache/thumbnails" "Desktop Thumbnail Cache"
     measure_dir "$HOME/.cache/pip" "Python Pip Cache"
     measure_dir "$HOME/.npm" "NPM Package Cache"
-
-    # AI runtime caches
     measure_dir "$HOME/.claude/cache" "Claude Code Cache"
     measure_dir "$HOME/.claude/downloads" "Claude Temp Downloads"
 
@@ -236,7 +322,7 @@ run_inspect() {
     else
         echo -e "${BOLD}🎉 Total Disposable Bloat Eliminated: ${GREEN}${total_bloat} MB${NC}"
     fi
-    echo -e "DUMB prevents all of this from uploading, saving bandwidth and cloud quota.\n"
+    echo -e "DUMB prevents all of this from uploading, saving bandwidth and storage.\n"
 }
 
 run_backup() {
@@ -247,43 +333,41 @@ run_backup() {
         echo -e "${YELLOW}>>> Running in DRY-RUN mode. No files will be modified or transferred. <<<${NC}\n"
     fi
 
-    if ! command -v "$RCLONE_CMD" &> /dev/null; then
-        echo -e "${RED}Error: rclone is required for storage transport.${NC}"
-        exit 1
+    local active_engine
+    active_engine="$(detect_engine "$REMOTE")"
+    if [ "$active_engine" = "rclone" ]; then
+        if ! command -v "$RCLONE_CMD" &> /dev/null; then
+            echo -e "${RED}Error: Target is a cloud remote, but rclone is not installed.${NC}"
+            exit 1
+        fi
+    else
+        if ! command -v "$RSYNC_CMD" &> /dev/null; then
+            echo -e "${RED}Error: Target is a local path/pendrive, but rsync is not installed.${NC}"
+            exit 1
+        fi
     fi
 
     # 1. Personal Files
     echo -e "${GREEN}[Layer 1/6] Personal Files...${NC}"
-    local p_excludes=()
-    for exc in "${EXCLUDE_PERSONAL[@]}"; do
-        p_excludes+=(--exclude "$exc")
-    done
-
     for pdir in "${PERSONAL_DIRS[@]}"; do
         eval pdir="$pdir"
         if [ -d "$pdir" ]; then
             local bname
             bname="$(basename "$pdir")"
             echo "   • Syncing: $pdir -> ${REMOTE}/01-Personal-Files/${bname}"
-            "$RCLONE_CMD" sync "$pdir" "${REMOTE}/01-Personal-Files/${bname}" \
-                --backup-dir "${TRASH}/01-Personal-Files/${bname}" \
-                "${p_excludes[@]}" --fast-list --links $dry_flag
+            dumb_sync "$pdir" "${REMOTE}/01-Personal-Files/${bname}" \
+                "${TRASH}/01-Personal-Files/${bname}" "${EXCLUDE_PERSONAL[@]}"
         fi
     done
 
     # 2. Clean dot-config
     echo -e "\n${GREEN}[Layer 2/6] Clean App Configurations (~/.config)...${NC}"
     if [ -d "$HOME/.config" ]; then
-        local cfg_excludes=()
-        for exc in "${EXCLUDE_CONFIG[@]}"; do
-            cfg_excludes+=(--exclude "$exc")
-        done
-        "$RCLONE_CMD" sync "$HOME/.config" "${REMOTE}/02-dot-config" \
-            --backup-dir "${TRASH}/02-dot-config" \
-            "${cfg_excludes[@]}" --fast-list --links $dry_flag
+        dumb_sync "$HOME/.config" "${REMOTE}/02-dot-config" \
+            "${TRASH}/02-dot-config" "${EXCLUDE_CONFIG[@]}"
     fi
 
-    # 3. Browser Session Vault (Dynamic Preset)
+    # 3. Browser Session Vault
     echo -e "\n${GREEN}[Layer 3/6] Browser Session Vault (Preset: ${BROWSER_PRESET})...${NC}"
     local browser_preset_file="${PROJECT_ROOT}/presets/browsers/${BROWSER_PRESET}.conf"
     if [ "$BROWSER_PRESET" != "none" ] && [ -f "$browser_preset_file" ]; then
@@ -297,14 +381,9 @@ run_backup() {
             fi
         done
         if [ -n "$found_browser" ]; then
-            local b_excludes=()
-            for exc in "${BROWSER_EXCLUDES[@]}"; do
-                b_excludes+=(--exclude "$exc")
-            done
             echo "   • Syncing Browser [${BROWSER_NAME}]: $found_browser"
-            "$RCLONE_CMD" sync "$found_browser" "${REMOTE}/03-Browser-Vault" \
-                --backup-dir "${TRASH}/03-Browser-Vault" \
-                "${b_excludes[@]}" --fast-list --links $dry_flag
+            dumb_sync "$found_browser" "${REMOTE}/03-Browser-Vault" \
+                "${TRASH}/03-Browser-Vault" "${BROWSER_EXCLUDES[@]}"
         else
             echo "   No active profile directory found for ${BROWSER_NAME}. Skipping."
         fi
@@ -314,37 +393,30 @@ run_backup() {
 
     # 4. Home Dotfiles & Local Binaries
     echo -e "\n${GREEN}[Layer 4/6] Home Dotfiles & Custom Scripts...${NC}"
-    [ -f "$HOME/.bashrc" ] && "$RCLONE_CMD" copy "$HOME/.bashrc" "${REMOTE}/04-Home-Dotfiles/" $dry_flag
-    [ -f "$HOME/.gitconfig" ] && "$RCLONE_CMD" copy "$HOME/.gitconfig" "${REMOTE}/04-Home-Dotfiles/" $dry_flag
-    [ -f "$HOME/.profile" ] && "$RCLONE_CMD" copy "$HOME/.profile" "${REMOTE}/04-Home-Dotfiles/" $dry_flag
-    [ -f "$HOME/.zshrc" ] && "$RCLONE_CMD" copy "$HOME/.zshrc" "${REMOTE}/04-Home-Dotfiles/" $dry_flag
+    [ -f "$HOME/.bashrc" ] && dumb_copy "$HOME/.bashrc" "${REMOTE}/04-Home-Dotfiles/"
+    [ -f "$HOME/.gitconfig" ] && dumb_copy "$HOME/.gitconfig" "${REMOTE}/04-Home-Dotfiles/"
+    [ -f "$HOME/.profile" ] && dumb_copy "$HOME/.profile" "${REMOTE}/04-Home-Dotfiles/"
+    [ -f "$HOME/.zshrc" ] && dumb_copy "$HOME/.zshrc" "${REMOTE}/04-Home-Dotfiles/"
 
     if [ -d "$HOME/.local/bin" ]; then
-        "$RCLONE_CMD" sync "$HOME/.local/bin" "${REMOTE}/04-Home-Dotfiles/local-bin" \
-            --backup-dir "${TRASH}/04-Home-Dotfiles/local-bin" \
-            --exclude "agy" --exclude "rclone" --fast-list --links $dry_flag
+        dumb_sync "$HOME/.local/bin" "${REMOTE}/04-Home-Dotfiles/local-bin" \
+            "${TRASH}/04-Home-Dotfiles/local-bin" "agy" "rclone"
     fi
 
-    # 5. AI Agent Vault (Declarative Loop)
+    # 5. AI Agent Vault
     echo -e "\n${GREEN}[Layer 5/6] AI Agent Vault...${NC}"
-    local ai_excludes=()
-    for exc in "${EXCLUDE_AI_AGENTS[@]}"; do
-        ai_excludes+=(--exclude "$exc")
-    done
-
     for agent_entry in "${AI_AGENT_DIRS[@]}"; do
         local agent_name="${agent_entry%%:*}"
         local agent_path="${agent_entry#*:}"
         eval agent_path="$agent_path"
         if [ -d "$agent_path" ]; then
             echo "   • Syncing AI Agent [${agent_name}]: $agent_path"
-            "$RCLONE_CMD" sync "$agent_path" "${REMOTE}/05-AI-Agent-Vault/${agent_name}" \
-                --backup-dir "${TRASH}/05-AI-Agent-Vault/${agent_name}" \
-                "${ai_excludes[@]}" --fast-list --links $dry_flag
+            dumb_sync "$agent_path" "${REMOTE}/05-AI-Agent-Vault/${agent_name}" \
+                "${TRASH}/05-AI-Agent-Vault/${agent_name}" "${EXCLUDE_AI_AGENTS[@]}"
         fi
     done
 
-    # 6. Hardware Blueprint & Fonts (Dynamic Preset)
+    # 6. Hardware Blueprint & Fonts
     echo -e "\n${GREEN}[Layer 6/6] Hardware Blueprint (Preset: ${HARDWARE_PRESET})...${NC}"
     local hw_preset_file="${PROJECT_ROOT}/presets/hardware/${HARDWARE_PRESET}.conf"
     if [ "$HARDWARE_PRESET" != "none" ] && [ -f "$hw_preset_file" ]; then
@@ -355,18 +427,18 @@ run_backup() {
                 local bname
                 bname="$(basename "$hw_path")"
                 if [ -d "$hw_path" ]; then
-                    "$RCLONE_CMD" sync "$hw_path" "${REMOTE}/06-Hardware-Blueprint/${bname}" \
-                        --backup-dir "${TRASH}/06-Hardware-Blueprint/${bname}" --fast-list --links $dry_flag
+                    dumb_sync "$hw_path" "${REMOTE}/06-Hardware-Blueprint/${bname}" \
+                        "${TRASH}/06-Hardware-Blueprint/${bname}"
                 else
-                    "$RCLONE_CMD" copy "$hw_path" "${REMOTE}/06-Hardware-Blueprint/" $dry_flag
+                    dumb_copy "$hw_path" "${REMOTE}/06-Hardware-Blueprint/"
                 fi
             fi
         done
     fi
 
     if [ -d "$HOME/.local/share/fonts/JetBrainsMono" ]; then
-        "$RCLONE_CMD" sync "$HOME/.local/share/fonts/JetBrainsMono" "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" \
-            --backup-dir "${TRASH}/06-Hardware-Blueprint/fonts/JetBrainsMono" --fast-list --links $dry_flag
+        dumb_sync "$HOME/.local/share/fonts/JetBrainsMono" "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" \
+            "${TRASH}/06-Hardware-Blueprint/fonts/JetBrainsMono"
     fi
 
     echo -e "\n${BLUE}=====================================================${NC}"
@@ -374,13 +446,15 @@ run_backup() {
         echo -e "${YELLOW}  🔍 Dry-run check completed! No errors encountered.${NC}"
     else
         echo -e "${GREEN}  ✅ DUMB Backup Completed Successfully!             ${NC}"
-        notify_user "DUMB Backup Completed" "Workstation state safely preserved to ${REMOTE}"
+        notify_user "DUMB Backup Completed" "Workstation state safely preserved via ${active_engine} to ${REMOTE}"
     fi
     echo -e "${BLUE}=====================================================${NC}\n"
 }
 
 run_restore() {
     local requested_layers="$1"
+    local active_engine
+    active_engine="$(detect_engine "$REMOTE")"
 
     echo -e "${BLUE}=====================================================${NC}"
     echo -e "${BOLD}  🔄 DUMB Selective Workstation Restore               ${NC}"
@@ -398,18 +472,29 @@ run_restore() {
         read -rp "Select layers to restore [e.g. 1,3,4 or A]: " requested_layers
     fi
 
+    restore_copy() {
+        local src="$1"
+        local dst="$2"
+        if [ "$active_engine" = "rclone" ]; then
+            "$RCLONE_CMD" copy "$src" "$dst" --fast-list 2>/dev/null || true
+        else
+            mkdir -p "$dst"
+            "$RSYNC_CMD" -a "$src/" "$dst/" 2>/dev/null || true
+        fi
+    }
+
     restore_layer() {
         local layer_num="$1"
         case "$layer_num" in
             1)
                 echo -e "\n${GREEN}[Restoring Layer 1] Personal Files...${NC}"
-                "$RCLONE_CMD" copy "${REMOTE}/01-Personal-Files/Documents" "$HOME/Documents" --fast-list
-                "$RCLONE_CMD" copy "${REMOTE}/01-Personal-Files/Pictures" "$HOME/Pictures" --fast-list
-                "$RCLONE_CMD" copy "${REMOTE}/01-Personal-Files/Projects" "$HOME/Projects" --fast-list
+                restore_copy "${REMOTE}/01-Personal-Files/Documents" "$HOME/Documents"
+                restore_copy "${REMOTE}/01-Personal-Files/Pictures" "$HOME/Pictures"
+                restore_copy "${REMOTE}/01-Personal-Files/Projects" "$HOME/Projects"
                 ;;
             2)
                 echo -e "\n${GREEN}[Restoring Layer 2] Application Configurations...${NC}"
-                "$RCLONE_CMD" copy "${REMOTE}/02-dot-config" "$HOME/.config" --fast-list
+                restore_copy "${REMOTE}/02-dot-config" "$HOME/.config"
                 ;;
             3)
                 echo -e "\n${GREEN}[Restoring Layer 3] Browser Session Vault...${NC}"
@@ -418,29 +503,29 @@ run_restore() {
                     source "$browser_preset_file"
                     local dest_path="${BROWSER_PATHS[0]}"
                     mkdir -p "$dest_path"
-                    "$RCLONE_CMD" copy "${REMOTE}/03-Browser-Vault" "$dest_path" --fast-list
+                    restore_copy "${REMOTE}/03-Browser-Vault" "$dest_path"
                     echo "   Logins and cookies restored to: $dest_path"
                 fi
                 ;;
             4)
                 echo -e "\n${GREEN}[Restoring Layer 4] Dotfiles & Local Scripts...${NC}"
-                "$RCLONE_CMD" copy "${REMOTE}/04-Home-Dotfiles/.bashrc" "$HOME/" 2>/dev/null || true
-                "$RCLONE_CMD" copy "${REMOTE}/04-Home-Dotfiles/.gitconfig" "$HOME/" 2>/dev/null || true
-                "$RCLONE_CMD" copy "${REMOTE}/04-Home-Dotfiles/.profile" "$HOME/" 2>/dev/null || true
+                restore_copy "${REMOTE}/04-Home-Dotfiles/.bashrc" "$HOME/.bashrc"
+                restore_copy "${REMOTE}/04-Home-Dotfiles/.gitconfig" "$HOME/.gitconfig"
+                restore_copy "${REMOTE}/04-Home-Dotfiles/.profile" "$HOME/.profile"
                 mkdir -p "$HOME/.local/bin"
-                "$RCLONE_CMD" copy "${REMOTE}/04-Home-Dotfiles/local-bin" "$HOME/.local/bin" --fast-list
+                restore_copy "${REMOTE}/04-Home-Dotfiles/local-bin" "$HOME/.local/bin"
                 ;;
             5)
                 echo -e "\n${GREEN}[Restoring Layer 5] AI Agent Vault...${NC}"
                 mkdir -p "$HOME/.gemini/antigravity-cli" "$HOME/.claude"
-                "$RCLONE_CMD" copy "${REMOTE}/05-AI-Agent-Vault/gemini" "$HOME/.gemini/antigravity-cli" --fast-list 2>/dev/null || true
-                "$RCLONE_CMD" copy "${REMOTE}/05-AI-Agent-Vault/claude" "$HOME/.claude" --fast-list 2>/dev/null || true
+                restore_copy "${REMOTE}/05-AI-Agent-Vault/gemini" "$HOME/.gemini/antigravity-cli"
+                restore_copy "${REMOTE}/05-AI-Agent-Vault/claude" "$HOME/.claude"
                 ;;
             6)
                 echo -e "\n${GREEN}[Restoring Layer 6] Hardware Blueprint & Fonts...${NC}"
                 mkdir -p "$HOME/Nobara-Blueprint" "$HOME/.local/share/fonts/JetBrainsMono"
-                "$RCLONE_CMD" copy "${REMOTE}/06-Hardware-Blueprint" "$HOME/Nobara-Blueprint" --fast-list 2>/dev/null || true
-                "$RCLONE_CMD" copy "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" "$HOME/.local/share/fonts/JetBrainsMono" --fast-list 2>/dev/null || true
+                restore_copy "${REMOTE}/06-Hardware-Blueprint" "$HOME/Nobara-Blueprint"
+                restore_copy "${REMOTE}/06-Hardware-Blueprint/fonts/JetBrainsMono" "$HOME/.local/share/fonts/JetBrainsMono"
                 if command -v fc-cache &>/dev/null; then
                     fc-cache -fv "$HOME/.local/share/fonts" &>/dev/null || true
                 fi
@@ -508,14 +593,27 @@ case "$cmd" in
         ;;
     status)
         print_banner
-        echo -e "\nConfigured Target Remote: ${REMOTE}"
-        echo -e "Testing connection..."
-        if "$RCLONE_CMD" lsd "${REMOTE}" &>/dev/null; then
-            echo -e "${GREEN}Connection status: ONLINE${NC}"
-            echo -e "\nActive Layers on Remote:"
-            "$RCLONE_CMD" lsf "${REMOTE}"
+        local active_engine
+        active_engine="$(detect_engine "$REMOTE")"
+        echo -e "\nConfigured Target: ${REMOTE}"
+        echo -e "Storage Engine:    ${active_engine}"
+        echo -e "Testing destination access..."
+        if [ "$active_engine" = "rclone" ]; then
+            if "$RCLONE_CMD" lsd "${REMOTE}" &>/dev/null; then
+                echo -e "${GREEN}Status: ONLINE (Cloud)${NC}"
+                echo -e "\nActive Layers on Remote:"
+                "$RCLONE_CMD" lsf "${REMOTE}"
+            else
+                echo -e "${RED}Status: OFFLINE or cloud remote unreachable.${NC}"
+            fi
         else
-            echo -e "${RED}Connection status: OFFLINE or remote unreachable.${NC}"
+            if [ -d "$REMOTE" ]; then
+                echo -e "${GREEN}Status: READY (Local directory / Pendrive / Sync folder)${NC}"
+                echo -e "\nActive Layers on Target:"
+                ls -la "$REMOTE"
+            else
+                echo -e "${YELLOW}Status: Target directory does not exist yet (will be created on first backup).${NC}"
+            fi
         fi
         ;;
     version|--version|-v)

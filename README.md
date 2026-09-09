@@ -105,8 +105,13 @@ dumb inspect
 # 3. Dry-run inspection (see what transfers without touching anything)
 dumb check
 
-# 4. Run the clean 6-layer backup
+# 4. Run the clean 6-layer backup (Cloud via rclone, or USB/Nextcloud via rsync)
 dumb backup
+
+# Target Examples:
+dumb backup -r /run/media/$USER/PENDRIVE/DUMB-Vault  # USB Pendrive (offline, native rsync)
+dumb backup -r $HOME/Nextcloud/DUMB-Vault            # Nextcloud / Dropbox sync folder
+dumb backup -r gdrive:Ajaz-Backup-Hub                # Google Drive (cloud rclone)
 
 # 5. Restore onto a fresh OS (interactive checklist or flag-driven)
 dumb restore
@@ -121,7 +126,7 @@ DUMB is open-source and community-driven. You don't have to use Google Drive or 
 
 ### Ways to Contribute:
 - [ ] **Browser Presets**: Add profile pruning rules for Brave, Chrome, Vivaldi, Arc, and Zen.
-- [ ] **Engine Adapters**: Implement the local `rsync` backend for offline USB / NAS backups.
+- [x] **Engine Adapters**: Auto-routing dual engine: native `rsync` (USB/local) + `rclone` (cloud).
 - [ ] **Hardware Recipes**: Add fan and thermal profiles for ThinkPad (`thinkfan`), Framework, and Dell laptops.
 - [ ] **Desktop Presets**: Add window manager configurations for Hyprland, Sway, GNOME, and i3.
 - [ ] **Interactive TUI**: Build a clean terminal UI to toggle layers on and off.
