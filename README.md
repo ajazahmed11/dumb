@@ -6,11 +6,11 @@
 
 ## 💡 The Story Behind DUMB
 
-At 6:00 AM after an all-nighter recovering from a fresh Linux reinstall, searching for lost lecture slides, reconfiguring laptop fan curves, and dreading the thought of re-authenticating 20 different websites with 2FA, the realization hit:
+At 6:00 AM after an all-nighter recovering from a fresh Linux reinstall, searching for lost files, reconfiguring laptop fan curves, and all the .config files, the realization hit:
 
 > *"Why am I doing this by hand? I feel dumb."*
 
-Linus Torvalds famously named **Git** after British slang for an annoying person. Following that proud tradition of hacker self-deprecation, **DUMB** is a recursive acronym (**D**UMB's **U**niversal **M**igration & **B**ackup) created so you never have to feel dumb when migrating or backing up your Linux workstation again.
+**DUMB** is a recursive acronym (**D**UMB's **U**niversal **M**igration & **B**ackup) created so you never have to feel dumb when migrating or backing up your Linux workstation again.
 
 ---
 
